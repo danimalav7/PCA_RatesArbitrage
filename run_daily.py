@@ -51,7 +51,7 @@ def fetch_auction_calendar(mode: str = config.MODE) -> pd.DataFrame:
 
     url = (
         'https://www.treasurydirect.gov/TA_WS/securities/announced'
-        '?format=json&type=Bill,Note,Bond'
+        '?format=json'
     )
     try:
         resp = requests.get(url, timeout=15)
@@ -152,8 +152,8 @@ def main():
         mode=config.MODE,
     )
     print(f"  Fetched {len(rates_data)} trading days "
-          f"({rates_data['Date'].iloc[0].date()} → "
-          f"{rates_data['Date'].iloc[-1].date()})")
+          f"({rates_data['Date'].iloc[0]} → "
+          f"{rates_data['Date'].iloc[-1]})")
 
     # Step 2: PCA residuals
     print("\nStep 2: Computing rolling PCA residuals...")

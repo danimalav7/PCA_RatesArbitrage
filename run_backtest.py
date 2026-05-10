@@ -40,8 +40,8 @@ def main():
         mode=config.MODE,
     )
     print(f"  Fetched {len(rates_data)} trading days "
-          f"({rates_data['Date'].iloc[0].date()} → "
-          f"{rates_data['Date'].iloc[-1].date()})")
+          f"({rates_data['Date'].iloc[0]} → "
+          f"{rates_data['Date'].iloc[-1]})")
 
     # Step 2: PCA residuals
     print("\nStep 2: Computing rolling PCA residuals...")
