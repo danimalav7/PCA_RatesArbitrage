@@ -11,19 +11,18 @@
 #   - Look-ahead bias prevention: signal at T, execution at T+1
 #   - Transaction costs deducted from daily_pnl on exit day
 #
-# ENTRY CONDITIONS (all 5 must be true):
-#   1. Signal threshold: |Z[T+1]| > config.Z_ENTRY_THRESHOLD (3.0)
+# ENTRY CONDITIONS (all 4 must be true):
+#   1. Signal threshold: |Z[T]| > config.Z_ENTRY_THRESHOLD (3.0) — signal at T
 #   2. Entry stationarity: rolling_adf_60d[T] < config.ADF_THRESHOLD (60d only)
 #   3. No existing position for this tenor
 #   4. Auction flag on T+1 must be CLEAR
-#   5. Correlated position check: no existing position in same segment/direction
 #
 # EXIT CHECKS (in priority order):
 #   1. Stop loss: LONG if Z > entry_Z + 1.5; SHORT if Z < entry_Z - 1.5
 #   2. Non-stationarity: get_stationarity_vote(T) == 0 (all 4 windows flagging)
-#   3. Mean reversion: LONG if Z <= -1.0; SHORT if Z >= +1.0
+#   3. Mean reversion: LONG if Z <= +1.0; SHORT if Z >= -1.0
 #   4. Time stop: tenor-specific ACF horizon + segment buffer
-#   5. Auction suppress (LONG only): auction_flag[T] == SUPPRESS
+#   5. Auction suppress (LONG and SHORT): auction_flag[T] == SUPPRESS
 #
 # P&L CONVENTION:
 #   LONG  profits when residual DECREASES: pnl = -1 × residual_change
@@ -199,13 +198,16 @@ def run_backtest(
                     exit_triggered = True
                     exit_reason    = 'NON-STATIONARY'
 
-            # Exit 3: Mean reversion to ±z_exit_threshold
+            # Exit 3: Mean reversion — LONG exits when Z falls back to +z_exit_threshold
+            # (yield has reverted from cheap toward fair value).
+            # SHORT exits when Z rises back to -z_exit_threshold
+            # (yield has reverted from rich toward fair value).
             if (not exit_triggered and not is_entry_day
                     and reversion_eligible and not np.isnan(current_z)):
-                if direction == 'LONG' and current_z <= -z_exit_threshold:
+                if direction == 'LONG' and current_z <= z_exit_threshold:
                     exit_triggered = True
                     exit_reason    = 'MEAN-REVERSION'
-                elif direction == 'SHORT' and current_z >= z_exit_threshold:
+                elif direction == 'SHORT' and current_z >= -z_exit_threshold:
                     exit_triggered = True
                     exit_reason    = 'MEAN-REVERSION'
 
@@ -215,9 +217,10 @@ def run_backtest(
                 exit_triggered = True
                 exit_reason    = 'TIME-STOP'
 
-            # Exit 5: Auction suppress (LONG only)
-            if (not exit_triggered and not is_entry_day
-                    and direction == 'LONG'):
+            # Exit 5: Auction suppress (LONG and SHORT)
+            # Auction risk applies to both directions — an upcoming auction
+            # disrupts yield levels regardless of position direction.
+            if not exit_triggered and not is_entry_day:
                 auction_flag, _ = get_auction_flag_fn(
                     current_date, tenor, auction_calendar, mode=mode
                 )
@@ -228,16 +231,16 @@ def run_backtest(
             # ── Process exit ──────────────────────────────────────────────────
             if exit_triggered:
                 # Accrue exit day P&L before closing position
+                # NOTE: transaction costs are NOT deducted here — they are deducted
+                # once only in pnl_bps below. Deducting here would double-count costs.
                 if not np.isnan(current_residual):
                     exit_day_change = current_residual - pos['last_residual_bps']
-                    exit_day_pnl    = exit_day_change * (
+                    exit_day_pnl_raw = exit_day_change * (
                         -1 if direction == 'LONG' else 1
                     )
-                    pos['cumulative_pnl_bps'] += exit_day_pnl
-                    # Deduct round-trip transaction cost on exit day
-                    daily_pnl.loc[current_date, tenor] = (
-                        exit_day_pnl - (transaction_cost_bps * 2)
-                    )
+                    exit_day_pnl_bps = exit_day_pnl_raw * config.YIELD_TO_BPS_SCALAR
+                    pos['cumulative_pnl_raw'] += exit_day_pnl_raw
+                    daily_pnl.loc[current_date, tenor] = exit_day_pnl_bps
                     pos['last_residual_bps'] = current_residual
 
                 exit_z        = current_z if not np.isnan(current_z) else entry_zscore
@@ -246,7 +249,7 @@ def run_backtest(
                     else entry_residual
                 )
                 hold_days   = (current_date - pos['entry_date']).days
-                pnl_bps     = pos['cumulative_pnl_bps'] - transaction_cost_bps * 2
+                pnl_bps     = (pos['cumulative_pnl_raw'] * config.YIELD_TO_BPS_SCALAR) - transaction_cost_bps * 2
                 pnl_dollars = (
                     pnl_bps
                     * dv01_map[tenor]
@@ -284,9 +287,11 @@ def run_backtest(
                 if tenor in positions:
                     continue
 
-                exec_z = (
-                    float(z_score_df.loc[execution_date, tenor])
-                    if execution_date in z_score_df.index else np.nan
+                # Signal check uses current_date (T) — no look-ahead bias
+                # Execution residual uses execution_date (T+1) for entry price
+                signal_z = (
+                    float(z_score_df.loc[current_date, tenor])
+                    if current_date in z_score_df.index else np.nan
                 )
                 signal_adf_p = (
                     float(rolling_adf_60d.loc[current_date, tenor])
@@ -297,13 +302,13 @@ def run_backtest(
                     if execution_date in residuals_df.index else np.nan
                 )
 
-                # Condition 1: Z threshold
-                if np.isnan(exec_z) or abs(exec_z) <= z_entry_threshold:
+                # Condition 1: Z threshold — checked at T (signal date), not T+1
+                if np.isnan(signal_z) or abs(signal_z) <= z_entry_threshold:
                     continue
 
                 direction = (
-                    'LONG'  if exec_z >  z_entry_threshold else
-                    'SHORT' if exec_z < -z_entry_threshold else None
+                    'LONG'  if signal_z >  z_entry_threshold else
+                    'SHORT' if signal_z < -z_entry_threshold else None
                 )
                 if direction is None:
                     continue
@@ -322,18 +327,10 @@ def run_backtest(
                 if auction_flag != 'CLEAR':
                     continue
 
-                # Condition 5: No correlated position in same segment/direction
-                seg_tenors_list = segment_tenors[seg_name]
-                if any(
-                    t in positions and positions[t]['direction'] == direction
-                    for t in seg_tenors_list
-                ):
-                    continue
-
                 # Compute stop loss and time stop
                 stop_loss_z = (
-                    exec_z + stop_loss_buffer if direction == 'LONG'
-                    else exec_z - stop_loss_buffer
+                    signal_z + stop_loss_buffer if direction == 'LONG'
+                    else signal_z - stop_loss_buffer
                 )
                 time_stop = execution_date + pd.Timedelta(
                     days=acf_horizons_map[tenor]
@@ -342,7 +339,7 @@ def run_backtest(
 
                 positions[tenor] = {
                     'entry_date':           execution_date,
-                    'entry_zscore':         exec_z,
+                    'entry_zscore':         signal_z,
                     'entry_residual_bps':   (
                         exec_residual if not np.isnan(exec_residual) else 0.0
                     ),
@@ -355,7 +352,7 @@ def run_backtest(
                     'last_residual_bps':    (
                         exec_residual if not np.isnan(exec_residual) else 0.0
                     ),
-                    'cumulative_pnl_bps':   0.0,
+                    'cumulative_pnl_raw':   0.0,
                 }
 
         # ── SECTION C: DAILY P&L ACCUMULATION ────────────────────────────────
@@ -367,10 +364,11 @@ def run_backtest(
                 if current_date in residuals_df.index else 0.0
             )
 
-            residual_change  = current_residual - pos['last_residual_bps']
-            daily_pnl_bps    = residual_change * (-1 if direction == 'LONG' else 1)
-            pos['last_residual_bps']   = current_residual
-            pos['cumulative_pnl_bps'] += daily_pnl_bps
+            residual_change   = current_residual - pos['last_residual_bps']
+            daily_pnl_raw     = residual_change * (-1 if direction == 'LONG' else 1)
+            daily_pnl_bps     = daily_pnl_raw * config.YIELD_TO_BPS_SCALAR
+            pos['last_residual_bps']    = current_residual
+            pos['cumulative_pnl_raw']  += daily_pnl_raw
             daily_pnl.loc[current_date, tenor] = daily_pnl_bps
 
         daily_pnl.loc[current_date, 'TOTAL'] = (
@@ -451,7 +449,7 @@ def run_backtest(
             change   = curr_res - prev_res
             daily_pnl_contribution = change * (
                 -1 if trade['direction'] == 'LONG' else 1
-            )
+            ) * config.YIELD_TO_BPS_SCALAR
             wt['daily_steps'].append({
                 'date':      res_date.strftime('%Y-%m-%d'),
                 'residual':  round(curr_res, 4),

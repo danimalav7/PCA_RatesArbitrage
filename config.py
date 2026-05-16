@@ -27,8 +27,13 @@ VOTE_EXIT_THRESHOLD      = 0                  # exit if vote_count == 0 (all 4 w
 
 # ── Risk & Execution ──────────────────────────────────────────────────────────
 STOP_LOSS_BUFFER         = 1.5    # Z-score buffer above/below entry for stop loss
-REVERSION_ELIGIBLE_BUFFER = 2.0  # Z must move this far from entry before MR exit eligible
+REVERSION_ELIGIBLE_BUFFER = 0.5  # Z must move 0.5σ from entry before MR exit eligible
 TRANSACTION_COST_BPS     = 0.25  # per leg (round-trip = 0.50 bps)
+# Yield data from Federal Reserve is in decimal form (e.g. 0.0447 = 4.47%)
+# PCA residuals are therefore in decimal yield units, not basis points.
+# Multiply by YIELD_TO_BPS_SCALAR to convert residuals to basis points
+# before applying DV01 × notional P&L formula.
+YIELD_TO_BPS_SCALAR = 10_000
 PAPER_TRADING            = True  # True = paper trading mode
 
 # ── Position Sizing (duration-neutral, anchored to 10Yr = $1,000 notional) ───
