@@ -78,6 +78,10 @@ def compute_pca_residuals(
     # Output container
     residuals = pd.DataFrame(index=yield_changes.index, columns=tenors, dtype=float)
 
+    print(f"\nRolling PCA explained variance (sampled annually):")
+    print(f"  Window={window}d | n_components={n_components} | "
+          f"Mode={mode}")
+
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
 
@@ -95,6 +99,18 @@ def compute_pca_residuals(
                 # Fit PCA on window
                 pca = PCA(n_components=n_components)
                 pca.fit(scaled_window)
+
+                # Log explained variance on first valid date and every 252 days
+                # (approximately annually) so drift in factor structure is visible
+                if i == window or (i - window) % 252 == 0:
+                    ev = pca.explained_variance_ratio_
+                    cumulative_ev = ev[:n_components].sum()
+                    pc_str = '  '.join(
+                        f'PC{j+1}={ev[j]*100:.1f}%'
+                        for j in range(n_components)
+                    )
+                    print(f"  [{current_date.date()}] {pc_str}  "
+                          f"Cumulative={cumulative_ev*100:.1f}%")
 
                 # Project current day's change into PC space and reconstruct
                 current_scaled = scaler.transform(current_change.values.reshape(1, -1))
