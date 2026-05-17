@@ -82,6 +82,7 @@ def generate_signal_card(
     z_score_df: pd.DataFrame,
     rolling_adfs: dict,
     rolling_adf_60d: pd.DataFrame,
+    rolling_kpss_60d: pd.DataFrame,
     acf_summary_df: pd.DataFrame,
     auction_calendar: pd.DataFrame,
     segment_regime_df: pd.DataFrame,
@@ -173,7 +174,7 @@ def generate_signal_card(
     card['expected_move']    = expected_move
 
     # ── 2. Stationarity regime ────────────────────────────────────────────────
-    # Entry gate: 60d ADF only
+    # Entry gate: dual ADF + KPSS (both 60d rolling)
     rolling_adf_pval = (
         float(rolling_adf_60d.loc[date, tenor])
         if date in rolling_adf_60d.index and tenor in rolling_adf_60d.columns
@@ -181,12 +182,24 @@ def generate_signal_card(
     )
     card['rolling_adf_pvalue'] = rolling_adf_pval
 
-    if np.isnan(rolling_adf_pval):
-        tenor_stationarity = 'UNKNOWN'
-    elif rolling_adf_pval < config.ADF_THRESHOLD:
+    rolling_kpss_pval = (
+        float(rolling_kpss_60d.loc[date, tenor])
+        if date in rolling_kpss_60d.index and tenor in rolling_kpss_60d.columns
+        else np.nan
+    )
+    card['rolling_kpss_pvalue'] = rolling_kpss_pval
+
+    adf_stationary  = not np.isnan(rolling_adf_pval)  and rolling_adf_pval  < config.ADF_THRESHOLD
+    kpss_stationary = not np.isnan(rolling_kpss_pval) and rolling_kpss_pval > config.KPSS_ENTRY_THRESHOLD
+
+    if adf_stationary and kpss_stationary:
         tenor_stationarity = 'STATIONARY'
-    else:
+    elif not adf_stationary and not kpss_stationary:
         tenor_stationarity = 'NON-STATIONARY'
+    elif np.isnan(rolling_adf_pval) or np.isnan(rolling_kpss_pval):
+        tenor_stationarity = 'UNKNOWN'
+    else:
+        tenor_stationarity = 'AMBIGUOUS'
     card['tenor_stationarity_status'] = tenor_stationarity
 
     # Multi-window vote for escalation display
@@ -273,7 +286,7 @@ def generate_signal_card(
     card['pc3_explained_variance'] = (
         float(pc3_var) if not np.isnan(pc3_var) else np.nan
     )
-    pc3_elevated = not np.isnan(pc3_var) and pc3_var > 0.15
+    pc3_elevated = not np.isnan(pc3_var) and pc3_var > config.PC3_ELEVATED_THRESHOLD
     card['pc3_elevated_flag'] = pc3_elevated
 
     # ── 7. Overall trade eligibility ──────────────────────────────────────────
@@ -281,8 +294,8 @@ def generate_signal_card(
 
     if auction_flag == 'SUPPRESS':
         blocked_reasons.append('AUCTION-SUPPRESS')
-    if tenor_stationarity == 'NON-STATIONARY':
-        blocked_reasons.append('NON-STATIONARY')
+    if tenor_stationarity in ('NON-STATIONARY', 'AMBIGUOUS', 'UNKNOWN'):
+        blocked_reasons.append(f'STATIONARITY-{tenor_stationarity}')
     if pc3_elevated:
         blocked_reasons.append('PC3-ELEVATED')
     if signal_direction == 'FLAT':
@@ -313,6 +326,7 @@ def scan_signals(
     z_score_df: pd.DataFrame,
     rolling_adfs: dict,
     rolling_adf_60d: pd.DataFrame,
+    rolling_kpss_60d: pd.DataFrame,
     acf_summary_df: pd.DataFrame,
     auction_calendar: pd.DataFrame,
     segment_regime_df: pd.DataFrame,
@@ -344,6 +358,7 @@ def scan_signals(
             z_score_df=z_score_df,
             rolling_adfs=rolling_adfs,
             rolling_adf_60d=rolling_adf_60d,
+            rolling_kpss_60d=rolling_kpss_60d,
             acf_summary_df=acf_summary_df,
             auction_calendar=auction_calendar,
             segment_regime_df=segment_regime_df,

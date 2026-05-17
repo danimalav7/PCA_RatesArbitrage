@@ -3,6 +3,7 @@
 # ============================================================================
 # Provides:
 #   compute_rolling_adf()        — rolling ADF p-values across multiple windows
+#   compute_rolling_kpss()       — rolling KPSS p-values for 60d entry gate
 #   get_stationarity_vote()      — 4-window majority vote (returns raw int 0-4)
 #   compute_voting_stationary_df() — full date×tenor boolean DataFrame
 #   compute_acf_summary()        — ACF/PACF mean reversion horizon per tenor
@@ -83,20 +84,86 @@ def compute_rolling_adf(
     return result
 
 
+def compute_rolling_kpss(
+    residuals_df: pd.DataFrame,
+    window: int = config.ADF_ENTRY_WINDOW,
+    mode: str = config.MODE,
+) -> pd.DataFrame:
+    """
+    Compute rolling KPSS p-values using a single window size.
+
+    KPSS: H0 = stationary. p > config.KPSS_ENTRY_THRESHOLD → fail to reject
+    → stationary evidence. Used alongside rolling ADF as dual entry gate.
+
+    Parameters
+    ----------
+    residuals_df : pd.DataFrame
+        Daily PCA residuals. Output of compute_pca_residuals().
+    window : int
+        Rolling window size in trading days.
+        Default: config.ADF_ENTRY_WINDOW (60).
+    mode : str
+        Data mode label. No branching.
+
+    Returns
+    -------
+    pd.DataFrame
+        Rolling KPSS p-values indexed by date, columns = config.TENORS.
+        Note: KPSS p-values are bounded [0.01, 0.10] by statsmodels
+        interpolation table — values outside this range are clipped.
+    """
+    tenors = config.TENORS
+    pvals_by_tenor = {}
+
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+
+        for tenor in tenors:
+            series = residuals_df[tenor].dropna()
+            pvals      = []
+            roll_dates = []
+
+            for i in range(window, len(series) + 1):
+                window_series = series.iloc[i - window:i]
+                try:
+                    result = kpss(
+                        window_series,
+                        regression='c',
+                        nlags='auto'
+                    )
+                    pvals.append(result[1])
+                except Exception:
+                    pvals.append(np.nan)
+                roll_dates.append(series.index[i - 1])
+
+            pvals_by_tenor[tenor] = pd.Series(pvals, index=roll_dates)
+
+    rolling_kpss_60d = pd.DataFrame(pvals_by_tenor)
+
+    print(f"Rolling KPSS {window}d computed: {len(rolling_kpss_60d)} dates")
+    print(f"Date range: {rolling_kpss_60d.index[0].date()} → "
+          f"{rolling_kpss_60d.index[-1].date()}")
+
+    return rolling_kpss_60d
+
+
 def get_stationarity_vote(
     date: pd.Timestamp,
     tenor: str,
     rolling_adfs: dict,
     threshold: float = config.ADF_THRESHOLD,
+    windows: list = None,
 ) -> int | None:
     """
-    Majority vote across all rolling ADF windows for a given date and tenor.
+    Vote across a specified subset of rolling ADF windows for a given date and tenor.
 
     Returns the raw count of windows voting stationary (p < threshold).
     Callers implement their own threshold logic:
-        entry gate : rolling_adfs[60].loc[date, tenor] < threshold
-        exit gate  : get_stationarity_vote(...) == 0
-        escalation : 4=CLEAR, 3=MONITOR, 2=WARNING, 1=DETERIORATING, 0=EXIT TRIGGER
+        entry gate : rolling_adfs[60].loc[date, tenor] < threshold (ADF)
+                     rolling_kpss_60d.loc[date, tenor] > threshold (KPSS)
+        exit gate  : get_stationarity_vote(..., windows=config.EXIT_ADF_WINDOWS) == 0
+                     Only 60d window used for exit — short windows lack statistical power
+        escalation : uses all ROLLING_ADF_WINDOWS for display only (not for exit decisions)
 
     Parameters
     ----------
@@ -118,7 +185,13 @@ def get_stationarity_vote(
     votes_stationary = 0
     available_windows = 0
 
-    for window_size, df_w in rolling_adfs.items():
+    # Filter to specified windows only — if None, use all windows
+    adfs_to_check = (
+        {w: rolling_adfs[w] for w in windows if w in rolling_adfs}
+        if windows is not None else rolling_adfs
+    )
+
+    for window_size, df_w in adfs_to_check.items():
         if date in df_w.index and tenor in df_w.columns:
             val = df_w.loc[date, tenor]
             if not np.isnan(val):
@@ -126,7 +199,8 @@ def get_stationarity_vote(
                 if val < threshold:
                     votes_stationary += 1
 
-    if available_windows < 3:
+    min_windows = max(1, len(adfs_to_check) - 1)  # require at least n-1 windows to have data
+    if available_windows < min_windows:
         return None  # insufficient data — conservative default
 
     return votes_stationary  # raw count (0-4)

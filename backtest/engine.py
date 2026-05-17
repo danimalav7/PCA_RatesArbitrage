@@ -11,15 +11,38 @@
 #   - Look-ahead bias prevention: signal at T, execution at T+1
 #   - Transaction costs deducted from daily_pnl on exit day
 #
+# BIAS PREVENTION RULES (NON-NEGOTIABLE):
+# 1. Look-ahead bias: all signal computations on date T use data with index < T
+# 2. Transaction timing: signals generated at close T, trades entered at open T+1
+# 3. Z-score normalization: 60-day rolling mean/std excludes date T
+# 4. Stale data: no signals if rates_data missing data for date T
+# 5. No parameter optimization: all parameters fixed before backtest loop
+#
+# KNOWN ASSUMPTIONS & LIMITATIONS:
+# A. EOD execution price: entry residual is recorded at T+1 EOD close, not T+1 open.
+#    In reality, orders would execute at T+1 open. Using T+1 EOD is optimistic —
+#    it gives the backtest the benefit of the full T+1 day's move before the
+#    position is officially on. This assumption will be corrected when the IBKR
+#    intraday feed is integrated (Sprint D), which will provide T+1 open prices.
+# B. Yield data in decimal form: Federal Reserve yields are in decimal units
+#    (e.g. 0.0447 = 4.47%). Residuals are therefore in decimal yield units.
+#    YIELD_TO_BPS_SCALAR = 10,000 is applied when converting to basis points.
+# C. Static DV01: DV01_MAP values are approximations at par. Actual DV01 drifts
+#    as yields move. At current rate levels (4-5%), long-end DV01 may be
+#    5-10% lower than the values in config.py.
+#
 # ENTRY CONDITIONS (all 4 must be true):
 #   1. Signal threshold: |Z[T]| > config.Z_ENTRY_THRESHOLD (3.0) — signal at T
-#   2. Entry stationarity: rolling_adf_60d[T] < config.ADF_THRESHOLD (60d only)
+#   2. Dual stationarity gate at T:
+#        rolling_adf_60d[T]  < config.ADF_THRESHOLD (0.05)  — rejects unit root
+#        rolling_kpss_60d[T] > config.KPSS_ENTRY_THRESHOLD (0.05) — confirms stationarity
 #   3. No existing position for this tenor
 #   4. Auction flag on T+1 must be CLEAR
 #
 # EXIT CHECKS (in priority order):
 #   1. Stop loss: LONG if Z > entry_Z + 1.5; SHORT if Z < entry_Z - 1.5
-#   2. Non-stationarity: get_stationarity_vote(T) == 0 (all 4 windows flagging)
+#   2. Non-stationarity: get_stationarity_vote(T, windows=[60]) == 0
+#      60d window only for exit — short windows lack statistical power
 #   3. Mean reversion: LONG if Z <= +1.0; SHORT if Z >= -1.0
 #   4. Time stop: tenor-specific ACF horizon + segment buffer
 #   5. Auction suppress (LONG and SHORT): auction_flag[T] == SUPPRESS
@@ -39,6 +62,7 @@ def run_backtest(
     residuals_df: pd.DataFrame,
     z_score_df: pd.DataFrame,
     rolling_adf_60d: pd.DataFrame,
+    rolling_kpss_60d: pd.DataFrame,
     rolling_adfs: dict,
     acf_summary_df: pd.DataFrame,
     auction_calendar: pd.DataFrame,
@@ -56,6 +80,10 @@ def run_backtest(
         Rolling Z-scores. Output of compute_zscore().
     rolling_adf_60d : pd.DataFrame
         60-day rolling ADF p-values. Used for entry gate only.
+    rolling_kpss_60d : pd.DataFrame
+        60-day rolling KPSS p-values. Output of compute_rolling_kpss().
+        Used alongside rolling_adf_60d for dual entry gate.
+        Entry requires KPSS p > config.KPSS_ENTRY_THRESHOLD (p > 0.05).
     rolling_adfs : dict
         All rolling ADF windows. Used for exit vote.
         Keys are window sizes (int).
@@ -89,6 +117,7 @@ def run_backtest(
     stop_loss_buffer          = config.STOP_LOSS_BUFFER
     reversion_eligible_buffer = config.REVERSION_ELIGIBLE_BUFFER
     adf_threshold             = config.ADF_THRESHOLD
+    kpss_entry_threshold      = config.KPSS_ENTRY_THRESHOLD
     time_stop_buffer_map      = config.TIME_STOP_BUFFER_MAP
 
     # ACF horizons per tenor
@@ -189,10 +218,13 @@ def run_backtest(
                     exit_triggered = True
                     exit_reason    = 'STOP-LOSS'
 
-            # Exit 2: Non-stationarity (all 4 windows flagging)
+            # Exit 2: Non-stationarity — 60d window only (EXIT_ADF_WINDOWS)
+            # Short windows (10d/15d) lack statistical power for exit decisions.
+            # Exit fires when the 60d window flags non-stationary (vote_count == 0).
             if not exit_triggered and not is_entry_day:
                 vote_count = get_stationarity_vote(
-                    current_date, tenor, rolling_adfs
+                    current_date, tenor, rolling_adfs,
+                    windows=config.EXIT_ADF_WINDOWS
                 )
                 if vote_count is not None and vote_count == 0:
                     exit_triggered = True
@@ -297,6 +329,10 @@ def run_backtest(
                     float(rolling_adf_60d.loc[current_date, tenor])
                     if current_date in rolling_adf_60d.index else np.nan
                 )
+                signal_kpss_p = (
+                    float(rolling_kpss_60d.loc[current_date, tenor])
+                    if current_date in rolling_kpss_60d.index else np.nan
+                )
                 exec_residual = (
                     float(residuals_df.loc[execution_date, tenor])
                     if execution_date in residuals_df.index else np.nan
@@ -313,8 +349,12 @@ def run_backtest(
                 if direction is None:
                     continue
 
-                # Condition 2: Entry stationarity (60d only)
-                if np.isnan(signal_adf_p) or signal_adf_p >= adf_threshold:
+                # Condition 2: Dual stationarity gate — both ADF and KPSS must confirm
+                # ADF:  p < 0.05 → reject unit root → stationary evidence
+                # KPSS: p > 0.05 → fail to reject stationarity → stationary evidence
+                adf_pass  = not np.isnan(signal_adf_p)  and signal_adf_p  < adf_threshold
+                kpss_pass = not np.isnan(signal_kpss_p) and signal_kpss_p > kpss_entry_threshold
+                if not (adf_pass and kpss_pass):
                     continue
 
                 # Condition 3: No existing position — checked by `if tenor in positions`

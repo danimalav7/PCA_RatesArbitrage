@@ -11,7 +11,7 @@ START_DATE  = '2005-12-01'   # ensures first valid Z-score by Mar 2006
 END_DATE    = None            # None = today
 
 # ── PCA ───────────────────────────────────────────────────────────────────────
-PCA_WINDOW     = 20           # rolling window for PCA fitting (trading days)
+PCA_WINDOW     = 60           # rolling window for PCA fitting (trading days)
 N_COMPONENTS   = 2            # number of principal components to retain
 
 # ── Z-Score ───────────────────────────────────────────────────────────────────
@@ -20,10 +20,18 @@ Z_ENTRY_THRESHOLD   = 3.0     # |Z| must exceed this to generate a signal
 Z_EXIT_THRESHOLD    = 1.0     # mean reversion exit: LONG exits at Z <= -1.0, SHORT at Z >= +1.0
 
 # ── Stationarity ──────────────────────────────────────────────────────────────
-ROLLING_ADF_WINDOWS      = [10, 15, 20, 60]   # windows for rolling ADF computation
+ROLLING_ADF_WINDOWS      = [10, 15, 20, 60]   # windows for rolling ADF computation (display + escalation)
 ADF_ENTRY_WINDOW         = 60                  # single window used for entry gate
-ADF_THRESHOLD            = 0.05               # p-value threshold for stationarity
+EXIT_ADF_WINDOWS         = [60]               # windows used for exit vote — 60d only
+                                              # Short windows (10d/15d) have insufficient statistical power
+                                              # for exit decisions; kept in ROLLING_ADF_WINDOWS for
+                                              # escalation display in signal card only
+ADF_THRESHOLD            = 0.05   # ADF p-value threshold — reject unit root
+KPSS_ENTRY_THRESHOLD     = 0.05   # KPSS p-value threshold — fail to reject stationarity
+                                  # Entry requires: ADF p < 0.05 AND KPSS p > 0.05
 VOTE_EXIT_THRESHOLD      = 0                  # exit if vote_count == 0 (all 4 windows flagging)
+PC3_ELEVATED_THRESHOLD   = 0.15              # PC3 variance above this → elevated idiosyncratic risk
+                                              # Rough 80th percentile heuristic — refine with full history
 
 # ── Risk & Execution ──────────────────────────────────────────────────────────
 STOP_LOSS_BUFFER         = 1.5    # Z-score buffer above/below entry for stop loss
