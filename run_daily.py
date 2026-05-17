@@ -28,6 +28,7 @@ from data.fetch_rates import FetchRates
 from analytics.pca import compute_pca_residuals
 from analytics.stationarity import (
     compute_rolling_adf,
+    compute_rolling_kpss,
     compute_acf_summary,
 )
 from signals.zscore import compute_zscore, scan_signals
@@ -174,6 +175,13 @@ def main():
     )
     rolling_adf_60d = rolling_adfs[config.ADF_ENTRY_WINDOW]
 
+    print("\nStep 3b: Computing rolling KPSS (60d entry gate)...")
+    rolling_kpss_60d = compute_rolling_kpss(
+        residuals_df,
+        window=config.ADF_ENTRY_WINDOW,
+        mode=config.MODE,
+    )
+
     # Step 4: Z-scores
     print("\nStep 4: Computing Z-scores...")
     z_score_df = compute_zscore(
@@ -197,6 +205,7 @@ def main():
         z_score_df=z_score_df,
         rolling_adfs=rolling_adfs,
         rolling_adf_60d=rolling_adf_60d,
+        rolling_kpss_60d=rolling_kpss_60d,
         acf_summary_df=acf_summary_df,
         auction_calendar=auction_calendar,
         segment_regime_df=segment_regime_df,

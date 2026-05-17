@@ -6,3 +6,4 @@ outputs/
 *.log
 *.pyc
 __pycache__/
+backtest_output.txt
