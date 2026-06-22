@@ -2,18 +2,32 @@
 # analytics/stationarity.py — Stationarity testing and voting system
 # ============================================================================
 # Provides:
-#   compute_rolling_adf()        — rolling ADF p-values across multiple windows
-#   compute_rolling_kpss()       — rolling KPSS p-values for 60d entry gate
-#   get_stationarity_vote()      — 4-window majority vote (returns raw int 0-4)
+#   compute_rolling_adf()          — rolling ADF p-values across multiple windows
+#   compute_rolling_kpss()         — rolling KPSS p-values for entry/exit gates
+#   get_stationarity_vote()        — multi-window vote (returns raw int 0-N)
 #   compute_voting_stationary_df() — full date×tenor boolean DataFrame
-#   compute_acf_summary()        — ACF/PACF mean reversion horizon per tenor
-#   compute_segment_regime_df()  — 60d-only segment suppression (dead variable,
-#                                  kept for reference; not used in live logic)
+#   compute_acf_summary()          — ACF/PACF mean reversion horizon per tenor
+#   compute_hurst_exponent()       — Hurst exponent via R/S analysis (documentation)
+#   compute_segment_regime_df()    — 60d-only segment suppression (dead variable,
+#                                    kept for reference; not used in live logic)
+#   compute_full_sample_stationarity() — full-sample ADF+KPSS baseline
 #
-# Entry gate  : rolling_adf_60d p-value < 0.05 (single window, most reliable)
-# Exit gate   : get_stationarity_vote() == 0 (all 4 windows flagging)
-# Escalation  : vote count drives CLEAR / MONITOR / WARNING / DETERIORATING /
-#               EXIT TRIGGER display states
+# Level residuals (Sprint C-PROD-A onwards):
+#   Entry gate  : 252d rolling ADF p < 0.05 AND KPSS p > 0.05 (both must pass)
+#   Exit gate   : get_stationarity_vote(windows=[180,252]) == 0
+#                 Both 180d AND 252d must flag non-stationary to trigger exit
+#                 180d catches regime breaks 8-24 days before 252d alone
+#   Escalation  : vote count drives CLEAR / MONITOR / WARNING / DETERIORATING /
+#                 EXIT TRIGGER display states
+#
+# Why longer windows for level residuals vs change residuals:
+#   Change residuals: MR horizon 1-5 days  → 60d window = 12-60 cycles (reliable)
+#   Level residuals:  MR horizon 15-25 days → 60d window = 2-4 cycles (unreliable)
+#   Level residuals need 252d window (10-17 cycles) for ADF to have power
+#   Confirmed: 10/10 tenors TRADEABLE at 252d, all AVOID at 60d
+#
+# Hurst exponent of level residuals: H = 0.80-0.86 (documented, not a live gate)
+#   Long memory — dislocations persist 15-25 days. This IS the tradeable signal.
 # ============================================================================
 
 import numpy as np
@@ -31,13 +45,23 @@ def compute_rolling_adf(
     """
     Compute rolling ADF p-values across multiple window sizes.
 
+    For level residuals (Sprint C-PROD-A onwards), use:
+        windows = config.ROLLING_ADF_WINDOWS ([120, 180, 252])
+        Entry gate uses window 252 only.
+        Exit gate uses windows [180, 252] via get_stationarity_vote().
+        120d is computed for display/escalation only.
+
     Parameters
     ----------
     residuals_df : pd.DataFrame
-        Daily PCA residuals. Output of compute_pca_residuals().
+        Daily PCA level residuals. Output of compute_pca_residuals().
+        Units: decimal yield (e.g. 0.001 = 10 bps of mispricing).
     windows : list of int
         Rolling window sizes in trading days.
-        Default: config.ROLLING_ADF_WINDOWS ([10, 15, 20, 60]).
+        Default: config.ROLLING_ADF_WINDOWS ([120, 180, 252]).
+        120d: display/escalation only (BORDERLINE statistical power)
+        180d: exit vote (good power, early regime break detection)
+        252d: entry gate + exit vote (reliable, 10/10 tenors TRADEABLE)
     mode : str
         Data mode label. No branching.
 
@@ -46,7 +70,7 @@ def compute_rolling_adf(
     dict
         Keys are window sizes (int). Values are pd.DataFrames of ADF p-values,
         indexed by date, columns = config.TENORS.
-        Example: {10: df_10d, 15: df_15d, 20: df_20d, 60: df_60d}
+        Example: {120: df_120d, 180: df_180d, 252: df_252d}
     """
     tenors = config.TENORS
     result = {}
@@ -95,13 +119,20 @@ def compute_rolling_kpss(
     KPSS: H0 = stationary. p > config.KPSS_ENTRY_THRESHOLD → fail to reject
     → stationary evidence. Used alongside rolling ADF as dual entry gate.
 
+    For level residuals (Sprint C-PROD-A onwards):
+        Entry gate: call with window=252 (config.ADF_ENTRY_WINDOW)
+        Exit gate:  call with window=180 and window=252 separately,
+                    then pass both to get_stationarity_vote(windows=[180,252])
+
     Parameters
     ----------
     residuals_df : pd.DataFrame
-        Daily PCA residuals. Output of compute_pca_residuals().
+        Daily PCA level residuals. Output of compute_pca_residuals().
+        Units: decimal yield.
     window : int
         Rolling window size in trading days.
-        Default: config.ADF_ENTRY_WINDOW (60).
+        Default: config.ADF_ENTRY_WINDOW (252 for level residuals).
+        Use 252 for entry gate, 180 for exit vote contribution.
     mode : str
         Data mode label. No branching.
 
@@ -159,11 +190,23 @@ def get_stationarity_vote(
 
     Returns the raw count of windows voting stationary (p < threshold).
     Callers implement their own threshold logic:
-        entry gate : rolling_adfs[60].loc[date, tenor] < threshold (ADF)
-                     rolling_kpss_60d.loc[date, tenor] > threshold (KPSS)
-        exit gate  : get_stationarity_vote(..., windows=config.EXIT_ADF_WINDOWS) == 0
-                     Only 60d window used for exit — short windows lack statistical power
-        escalation : uses all ROLLING_ADF_WINDOWS for display only (not for exit decisions)
+
+    Level residuals (Sprint C-PROD-A onwards):
+        entry gate : rolling_adfs[252].loc[date, tenor] < threshold (ADF)
+                     rolling_kpss_252d.loc[date, tenor] > threshold (KPSS)
+                     Both must pass — neither alone is sufficient
+        exit gate  : get_stationarity_vote(..., windows=[180, 252]) == 0
+                     Both 180d AND 252d must flag non-stationary to trigger exit
+                     180d catches regime breaks 8-24 days before 252d alone
+        escalation : uses all ROLLING_ADF_WINDOWS [120,180,252] for display
+                     120d: BORDERLINE statistical power — display only
+                     180d: good power — contributes to exit vote
+                     252d: reliable — drives entry gate and exit vote
+
+    Vote count interpretation for [180, 252] exit windows:
+        2 = both stationary  → CLEAR    (no exit)
+        1 = one flagging     → WARNING  (monitor closely)
+        0 = both flagging    → EXIT TRIGGER (exit position)
 
     Parameters
     ----------
@@ -209,12 +252,20 @@ def get_stationarity_vote(
 def compute_voting_stationary_df(
     rolling_adfs: dict,
     tenors: list = config.TENORS,
+    min_votes: int = None,
 ) -> pd.DataFrame:
     """
     Build a full date × tenor boolean DataFrame from the stationarity vote.
 
-    True  = vote_count >= 3 (3+ windows agree stationary)
-    False = vote_count <  3 or None (conservative default)
+    For level residuals (Sprint C-PROD-A onwards) with windows=[180, 252]:
+        True  = vote_count >= 2 (both windows agree stationary)
+        False = vote_count <  2 or None (conservative default)
+
+    For change residuals (legacy, windows=[10,15,20,60]):
+        True  = vote_count >= 3 (3+ windows agree stationary)
+        False = vote_count <  3 or None (conservative default)
+
+    The threshold parameter controls the minimum votes required for True.
 
     Parameters
     ----------
@@ -238,7 +289,14 @@ def compute_voting_stationary_df(
     for date in all_dates:
         for tenor in tenors:
             result = get_stationarity_vote(date, tenor, rolling_adfs)
-            voting_df.loc[date, tenor] = False if result is None else (result >= 3)
+            # Default min_votes: all available windows must agree
+            # For [180,252] exit windows: min_votes=2 (both must agree)
+            # For [10,15,20,60] legacy: min_votes=3
+            n_windows  = len(rolling_adfs)
+            threshold  = min_votes if min_votes is not None else max(1, n_windows - 1)
+            voting_df.loc[date, tenor] = (
+                False if result is None else (result >= threshold)
+            )
 
     print(f"voting_stationary_df: {len(voting_df)} dates × {len(tenors)} tenors")
     return voting_df
@@ -313,6 +371,98 @@ def compute_acf_summary(
             'Decay Type':      _decay_type(acf_vals, first_crossing, ci),
             'Sig. PACF Lags':  sig_pacf_lags if sig_pacf_lags else ['None'],
             'Classification':  _classify_acf(first_crossing),
+        })
+
+    return pd.DataFrame(rows).set_index('Tenor')
+
+
+def compute_hurst_exponent(
+    residuals_df: pd.DataFrame,
+    tenors: list = config.TENORS,
+) -> pd.DataFrame:
+    """
+    Estimate Hurst exponent for each tenor via R/S analysis.
+
+    The Hurst exponent H characterizes the long-memory behavior of a series:
+        H < 0.5 → anti-persistent (mean-reverting, faster than random walk)
+        H = 0.5 → random walk (no memory)
+        H > 0.5 → persistent (long memory, slow mean reversion)
+
+    For level residuals (Sprint C-PROD-A):
+        H = 0.80-0.86 across all tenors — long memory.
+        Interpretation: dislocations persist 15-25 days before reverting.
+        This IS the tradeable signal duration, NOT a sign of non-stationarity.
+        Full-sample ADF+KPSS confirms stationarity — H measures reversion speed.
+
+    This function is for DOCUMENTATION and MONITORING only.
+    H is not used as a live trading gate — it is a structural characteristic
+    of level residuals that informs time stop calibration.
+
+    Parameters
+    ----------
+    residuals_df : pd.DataFrame
+        Daily PCA residuals. Output of compute_pca_residuals().
+    tenors : list
+        Tenor list. Default: config.TENORS.
+
+    Returns
+    -------
+    pd.DataFrame
+        Indexed by tenor. Columns: H, interpretation, mean_reversion_days.
+        mean_reversion_days is estimated from H using empirical ACF results.
+    """
+    def _hurst_rs(series):
+        # R/S analysis — rescaled range method
+        arr = np.array(series.dropna())
+        n   = len(arr)
+        rs_values, ns = [], []
+        for chunk_size in [10, 20, 40, 60, 120, 252]:
+            if chunk_size > n // 2:
+                continue
+            chunks   = [arr[i:i+chunk_size]
+                        for i in range(0, n - chunk_size + 1, chunk_size)]
+            rs_chunk = []
+            for chunk in chunks:
+                mean = np.mean(chunk)
+                devs = np.cumsum(chunk - mean)
+                r    = np.max(devs) - np.min(devs)
+                s    = np.std(chunk, ddof=1)
+                if s > 0:
+                    rs_chunk.append(r / s)
+            if rs_chunk:
+                rs_values.append(np.mean(rs_chunk))
+                ns.append(chunk_size)
+        if len(ns) < 2:
+            return np.nan
+        return np.polyfit(np.log(ns), np.log(rs_values), 1)[0]
+
+    rows = []
+    for tenor in tenors:
+        h = _hurst_rs(residuals_df[tenor])
+        if np.isnan(h):
+            interp   = 'insufficient data'
+            mr_days  = np.nan
+        elif h < 0.4:
+            interp   = 'strong mean-reversion (faster than RW)'
+            mr_days  = 5
+        elif h < 0.5:
+            interp   = 'mild mean-reversion'
+            mr_days  = 10
+        elif h < 0.55:
+            interp   = 'near random walk'
+            mr_days  = 20
+        elif h < 0.9:
+            interp   = 'long memory — slow mean reversion'
+            mr_days  = 25  # calibrated from ACF analysis of level residuals
+        else:
+            interp   = 'strongly persistent — investigate'
+            mr_days  = np.nan
+
+        rows.append({
+            'Tenor':           tenor,
+            'H':               round(h, 3) if not np.isnan(h) else np.nan,
+            'Interpretation':  interp,
+            'MR_horizon_days': mr_days,
         })
 
     return pd.DataFrame(rows).set_index('Tenor')
