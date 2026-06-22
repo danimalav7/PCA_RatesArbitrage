@@ -81,8 +81,8 @@ def generate_signal_card(
     residuals_df: pd.DataFrame,
     z_score_df: pd.DataFrame,
     rolling_adfs: dict,
-    rolling_adf_60d: pd.DataFrame,
-    rolling_kpss_60d: pd.DataFrame,
+    rolling_adf_252d: pd.DataFrame,
+    rolling_kpss_252d: pd.DataFrame,
     acf_summary_df: pd.DataFrame,
     auction_calendar: pd.DataFrame,
     segment_regime_df: pd.DataFrame,
@@ -105,9 +105,11 @@ def generate_signal_card(
     rolling_adfs : dict
         All rolling ADF windows. Output of compute_rolling_adf().
         Keys are window sizes (int).
-    rolling_adf_60d : pd.DataFrame
-        60-day rolling ADF p-values (rolling_adfs[60]).
+    rolling_adf_252d : pd.DataFrame
+        252-day rolling ADF p-values (rolling_adfs[252]).
         Passed separately for convenience since it's used for entry gate.
+    rolling_kpss_252d : pd.DataFrame
+        252-day rolling KPSS p-values. Used alongside rolling_adf_252d for entry gate.
     acf_summary_df : pd.DataFrame
         ACF/PACF summary. Output of compute_acf_summary().
     auction_calendar : pd.DataFrame
@@ -174,17 +176,18 @@ def generate_signal_card(
     card['expected_move']    = expected_move
 
     # ── 2. Stationarity regime ────────────────────────────────────────────────
-    # Entry gate: dual ADF + KPSS (both 60d rolling)
+    # Entry gate: dual ADF + KPSS (both 252d rolling)
+    # 252d required for level residuals — only window with reliable statistical power
     rolling_adf_pval = (
-        float(rolling_adf_60d.loc[date, tenor])
-        if date in rolling_adf_60d.index and tenor in rolling_adf_60d.columns
+        float(rolling_adf_252d.loc[date, tenor])
+        if date in rolling_adf_252d.index and tenor in rolling_adf_252d.columns
         else np.nan
     )
     card['rolling_adf_pvalue'] = rolling_adf_pval
 
     rolling_kpss_pval = (
-        float(rolling_kpss_60d.loc[date, tenor])
-        if date in rolling_kpss_60d.index and tenor in rolling_kpss_60d.columns
+        float(rolling_kpss_252d.loc[date, tenor])
+        if date in rolling_kpss_252d.index and tenor in rolling_kpss_252d.columns
         else np.nan
     )
     card['rolling_kpss_pvalue'] = rolling_kpss_pval
@@ -232,9 +235,9 @@ def generate_signal_card(
     seg_tenors = config.SEGMENT_TENORS.get(segment_name, [])
     non_stationary_in_segment = [
         t for t in seg_tenors
-        if date in rolling_adf_60d.index
-        and t in rolling_adf_60d.columns
-        and rolling_adf_60d.loc[date, t] > config.ADF_THRESHOLD
+        if date in rolling_adf_252d.index
+        and t in rolling_adf_252d.columns
+        and rolling_adf_252d.loc[date, t] > config.ADF_THRESHOLD
     ]
     card['non_stationary_tenors_in_segment'] = non_stationary_in_segment
     card['n_non_stationary_in_segment']      = len(non_stationary_in_segment)
@@ -325,8 +328,8 @@ def scan_signals(
     residuals_df: pd.DataFrame,
     z_score_df: pd.DataFrame,
     rolling_adfs: dict,
-    rolling_adf_60d: pd.DataFrame,
-    rolling_kpss_60d: pd.DataFrame,
+    rolling_adf_252d: pd.DataFrame,
+    rolling_kpss_252d: pd.DataFrame,
     acf_summary_df: pd.DataFrame,
     auction_calendar: pd.DataFrame,
     segment_regime_df: pd.DataFrame,
@@ -357,8 +360,8 @@ def scan_signals(
             residuals_df=residuals_df,
             z_score_df=z_score_df,
             rolling_adfs=rolling_adfs,
-            rolling_adf_60d=rolling_adf_60d,
-            rolling_kpss_60d=rolling_kpss_60d,
+            rolling_adf_252d=rolling_adf_252d,
+            rolling_kpss_252d=rolling_kpss_252d,
             acf_summary_df=acf_summary_df,
             auction_calendar=auction_calendar,
             segment_regime_df=segment_regime_df,

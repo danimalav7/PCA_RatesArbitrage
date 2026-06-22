@@ -45,10 +45,10 @@ ZSCORE_WINDOW       = 252     # rolling window for Z-score normalization
                               # Level residuals require longer window — 15-25 day MR horizon
                               # needs 10+ cycles for reliable mean/std estimation
 Z_ENTRY_THRESHOLD   = 3.0     # |Z| must exceed this to generate a signal
-Z_EXIT_THRESHOLD    = 1.0     # mean reversion exit: LONG exits at Z <= +1.0, SHORT at Z >= -1.0
-                              # Note: exit at +1.0 (not -1.0) — LONG entered at Z=+3.0,
-                              # exits when Z falls back to +1.0 (partial mean reversion captured)
-                              # Revisit threshold after level residual backtest
+Z_EXIT_THRESHOLD    = 0.5     # mean reversion exit: LONG exits at Z <= +0.5, SHORT at Z >= -0.5
+                              # Captures ~83% of mean reversion (Z=3.0 → Z=0.5)
+                              # without waiting for full overshoot to opposite side
+                              # Entry at Z=3.0, exit at Z=0.5 → 2.5σ of reversion captured
 
 # ── Stationarity ──────────────────────────────────────────────────────────────
 # Level residuals require longer windows than change residuals because:
@@ -82,7 +82,12 @@ PC3_ELEVATED_THRESHOLD   = 0.15               # PC3 variance threshold (unchange
                                               # Heuristic — refine after level residual backtest
 
 # ── Risk & Execution ──────────────────────────────────────────────────────────
-STOP_LOSS_BUFFER         = 1.5    # Z-score buffer above/below entry for stop loss
+STOP_LOSS_BUFFER         = 2.0    # Z-score buffer above/below entry for stop loss
+                                  # LONG stop: Z > entry_Z + 2.0 (e.g. Z > 5.0 at entry Z=3.0)
+                                  # SHORT stop: Z < entry_Z - 2.0 (e.g. Z < -5.0 at entry Z=-3.0)
+                                  # Widened from 1.5 for level residuals — larger magnitude
+                                  # dislocations need more room before cutting loss
+                                  # Revisit after backtest
 REVERSION_ELIGIBLE_BUFFER = 0.5  # Z must move 0.5σ from entry before MR exit eligible
 TRANSACTION_COST_BPS     = 0.25  # per leg (round-trip = 0.50 bps)
 # Yield data from Federal Reserve is in decimal form (e.g. 0.0447 = 4.47%)

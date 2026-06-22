@@ -30,21 +30,30 @@
 # C. Static DV01: DV01_MAP values are approximations at par. Actual DV01 drifts
 #    as yields move. At current rate levels (4-5%), long-end DV01 may be
 #    5-10% lower than the values in config.py.
+# D. Level residual strategy: PCA on vol-normalized yield levels (Sprint C-PROD-A).
+#    Residuals represent persistent yield mispricing (15-25 day MR horizon).
+#    Z=3.0 corresponds to 9-27 bps of mispricing vs 0.50 bps round-trip cost.
+#    Hurst H=0.80-0.86 — long memory, NOT non-stationarity.
 #
 # ENTRY CONDITIONS (all 4 must be true):
 #   1. Signal threshold: |Z[T]| > config.Z_ENTRY_THRESHOLD (3.0) — signal at T
-#   2. Dual stationarity gate at T:
-#        rolling_adf_60d[T]  < config.ADF_THRESHOLD (0.05)  — rejects unit root
-#        rolling_kpss_60d[T] > config.KPSS_ENTRY_THRESHOLD (0.05) — confirms stationarity
+#   2. Dual stationarity gate at T (level residuals — Sprint C-PROD-A onwards):
+#        rolling_adf_252d[T]  < config.ADF_THRESHOLD (0.05)  — rejects unit root
+#        rolling_kpss_252d[T] > config.KPSS_ENTRY_THRESHOLD (0.05) — confirms stationarity
+#        252d window required — level residuals need 10+ MR cycles for ADF power
 #   3. No existing position for this tenor
 #   4. Auction flag on T+1 must be CLEAR
 #
 # EXIT CHECKS (in priority order):
-#   1. Stop loss: LONG if Z > entry_Z + 1.5; SHORT if Z < entry_Z - 1.5
-#   2. Non-stationarity: get_stationarity_vote(T, windows=[60]) == 0
-#      60d window only for exit — short windows lack statistical power
-#   3. Mean reversion: LONG if Z <= +1.0; SHORT if Z >= -1.0
-#   4. Time stop: tenor-specific ACF horizon + segment buffer
+#   1. Stop loss: LONG exits if Z > entry_Z + 2.0; SHORT exits if Z < entry_Z - 2.0
+#      Widened from 1.5 — level residuals have larger magnitude dislocations
+#   2. Non-stationarity: get_stationarity_vote(T, windows=[180,252]) == 0
+#      Both 180d AND 252d must flag non-stationary to trigger exit
+#      180d catches regime breaks 8-24 days before 252d alone
+#   3. Mean reversion: LONG exits if Z <= +0.5; SHORT exits if Z >= -0.5
+#      Captures ~83% of mean reversion (Z=3.0 → Z=0.5)
+#      Entry at Z=3.0, exit at Z=+0.5 → 2.5σ of reversion captured
+#   4. Time stop: tenor-specific ACF horizon + segment buffer (25-40 days total)
 #   5. Auction suppress (LONG and SHORT): auction_flag[T] == SUPPRESS
 #
 # P&L CONVENTION:
@@ -61,8 +70,10 @@ from analytics.stationarity import get_stationarity_vote
 def run_backtest(
     residuals_df: pd.DataFrame,
     z_score_df: pd.DataFrame,
-    rolling_adf_60d: pd.DataFrame,
-    rolling_kpss_60d: pd.DataFrame,
+    rolling_adf_252d: pd.DataFrame,
+    rolling_kpss_252d: pd.DataFrame,
+    rolling_adf_180d: pd.DataFrame,
+    rolling_kpss_180d: pd.DataFrame,
     rolling_adfs: dict,
     acf_summary_df: pd.DataFrame,
     auction_calendar: pd.DataFrame,
@@ -78,12 +89,18 @@ def run_backtest(
         Daily PCA residuals. Output of compute_pca_residuals().
     z_score_df : pd.DataFrame
         Rolling Z-scores. Output of compute_zscore().
-    rolling_adf_60d : pd.DataFrame
-        60-day rolling ADF p-values. Used for entry gate only.
-    rolling_kpss_60d : pd.DataFrame
-        60-day rolling KPSS p-values. Output of compute_rolling_kpss().
-        Used alongside rolling_adf_60d for dual entry gate.
-        Entry requires KPSS p > config.KPSS_ENTRY_THRESHOLD (p > 0.05).
+    rolling_adf_252d : pd.DataFrame
+        252-day rolling ADF p-values. Used for entry gate only.
+        Level residuals require 252d — 60d had insufficient statistical power (all AVOID).
+    rolling_kpss_252d : pd.DataFrame
+        252-day rolling KPSS p-values. Used alongside rolling_adf_252d for dual entry gate.
+        Entry requires: ADF p < 0.05 AND KPSS p > 0.05 (both on 252d window).
+    rolling_adf_180d : pd.DataFrame
+        180-day rolling ADF p-values. Used for exit vote alongside 252d.
+        180d catches regime breaks 8-24 days before 252d alone.
+    rolling_kpss_180d : pd.DataFrame
+        180-day rolling KPSS p-values. Used for exit vote alongside 252d.
+        Exit fires when both 180d AND 252d flag non-stationary (vote_count == 0).
     rolling_adfs : dict
         All rolling ADF windows. Used for exit vote.
         Keys are window sizes (int).
@@ -112,13 +129,13 @@ def run_backtest(
     notional_map   = config.NOTIONAL_MAP
 
     transaction_cost_bps      = config.TRANSACTION_COST_BPS
-    z_entry_threshold         = config.Z_ENTRY_THRESHOLD
-    z_exit_threshold          = config.Z_EXIT_THRESHOLD
-    stop_loss_buffer          = config.STOP_LOSS_BUFFER
-    reversion_eligible_buffer = config.REVERSION_ELIGIBLE_BUFFER
-    adf_threshold             = config.ADF_THRESHOLD
-    kpss_entry_threshold      = config.KPSS_ENTRY_THRESHOLD
-    time_stop_buffer_map      = config.TIME_STOP_BUFFER_MAP
+    z_entry_threshold         = config.Z_ENTRY_THRESHOLD        # 3.0
+    z_exit_threshold          = config.Z_EXIT_THRESHOLD         # 0.5 — captures ~83% of reversion
+    stop_loss_buffer          = config.STOP_LOSS_BUFFER         # 2.0 — widened for level residuals
+    reversion_eligible_buffer = config.REVERSION_ELIGIBLE_BUFFER # 0.5
+    adf_threshold             = config.ADF_THRESHOLD            # 0.05
+    kpss_entry_threshold      = config.KPSS_ENTRY_THRESHOLD     # 0.05
+    time_stop_buffer_map      = config.TIME_STOP_BUFFER_MAP     # 25-40 day total stops
 
     # ACF horizons per tenor
     acf_horizons_map = {}
@@ -139,8 +156,13 @@ def run_backtest(
           f"({transaction_cost_bps * 2} bps round-trip)")
 
     # ── Date alignment ────────────────────────────────────────────────────────
+    # Date alignment uses 252d windows — first valid date is later than 60d approach
+    # but ensures all entry/exit gate data is available on every backtest date
     available_dates = (
-        set(rolling_adf_60d.index)
+        set(rolling_adf_252d.index)
+        & set(rolling_kpss_252d.index)
+        & set(rolling_adf_180d.index)
+        & set(rolling_kpss_180d.index)
         & set(z_score_df.index)
         & set(residuals_df.index)
     )
@@ -218,22 +240,23 @@ def run_backtest(
                     exit_triggered = True
                     exit_reason    = 'STOP-LOSS'
 
-            # Exit 2: Non-stationarity — 60d window only (EXIT_ADF_WINDOWS)
-            # Short windows (10d/15d) lack statistical power for exit decisions.
-            # Exit fires when the 60d window flags non-stationary (vote_count == 0).
+            # Exit 2: Non-stationarity — [180d, 252d] windows both must flag
+            # Both windows must agree (vote_count == 0 of 2) to trigger exit.
+            # 180d catches regime breaks 8-24 days before 252d alone.
+            # Using rolling_adfs which contains {120, 180, 252} — filter to EXIT_ADF_WINDOWS
             if not exit_triggered and not is_entry_day:
                 vote_count = get_stationarity_vote(
                     current_date, tenor, rolling_adfs,
-                    windows=config.EXIT_ADF_WINDOWS
+                    windows=config.EXIT_ADF_WINDOWS  # [180, 252]
                 )
                 if vote_count is not None and vote_count == 0:
                     exit_triggered = True
                     exit_reason    = 'NON-STATIONARY'
 
-            # Exit 3: Mean reversion — LONG exits when Z falls back to +z_exit_threshold
-            # (yield has reverted from cheap toward fair value).
-            # SHORT exits when Z rises back to -z_exit_threshold
-            # (yield has reverted from rich toward fair value).
+            # Exit 3: Mean reversion — captures ~83% of the signal
+            # LONG entered at Z=+3.0 → exit when Z falls to +0.5 (2.5σ captured)
+            # SHORT entered at Z=-3.0 → exit when Z rises to -0.5 (2.5σ captured)
+            # z_exit_threshold = 0.5 (config.Z_EXIT_THRESHOLD)
             if (not exit_triggered and not is_entry_day
                     and reversion_eligible and not np.isnan(current_z)):
                 if direction == 'LONG' and current_z <= z_exit_threshold:
@@ -325,13 +348,15 @@ def run_backtest(
                     float(z_score_df.loc[current_date, tenor])
                     if current_date in z_score_df.index else np.nan
                 )
+                # Entry gate: 252d ADF + KPSS dual confirmation
+                # 252d required for level residuals — only window with reliable power
                 signal_adf_p = (
-                    float(rolling_adf_60d.loc[current_date, tenor])
-                    if current_date in rolling_adf_60d.index else np.nan
+                    float(rolling_adf_252d.loc[current_date, tenor])
+                    if current_date in rolling_adf_252d.index else np.nan
                 )
                 signal_kpss_p = (
-                    float(rolling_kpss_60d.loc[current_date, tenor])
-                    if current_date in rolling_kpss_60d.index else np.nan
+                    float(rolling_kpss_252d.loc[current_date, tenor])
+                    if current_date in rolling_kpss_252d.index else np.nan
                 )
                 exec_residual = (
                     float(residuals_df.loc[execution_date, tenor])
