@@ -119,8 +119,10 @@ def main():
         mode=config.MODE,
     )
 
-    # Step 7: Confirm before diagnostics
-    input("\nValidation complete. Press Enter to run strategy diagnostics...")
+    # Step 7: Confirm before diagnostics (skip when piped / non-interactive)
+    import sys
+    if sys.stdin.isatty():
+        input("\nValidation complete. Press Enter to run strategy diagnostics...")
 
     # Step 8: Strategy diagnostics
     print("\nStep 7: Running strategy diagnostics...")
