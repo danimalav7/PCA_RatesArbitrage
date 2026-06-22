@@ -169,13 +169,13 @@ def compute_rolling_kpss(
 
             pvals_by_tenor[tenor] = pd.Series(pvals, index=roll_dates)
 
-    rolling_kpss_60d = pd.DataFrame(pvals_by_tenor)
+    rolling_kpss_df = pd.DataFrame(pvals_by_tenor)
 
-    print(f"Rolling KPSS {window}d computed: {len(rolling_kpss_60d)} dates")
-    print(f"Date range: {rolling_kpss_60d.index[0].date()} → "
-          f"{rolling_kpss_60d.index[-1].date()}")
+    print(f"Rolling KPSS {window}d computed: {len(rolling_kpss_df)} dates")
+    print(f"Date range: {rolling_kpss_df.index[0].date()} → "
+          f"{rolling_kpss_df.index[-1].date()}")
 
-    return rolling_kpss_60d
+    return rolling_kpss_df
 
 
 def get_stationarity_vote(
@@ -469,15 +469,15 @@ def compute_hurst_exponent(
 
 
 def compute_segment_regime_df(
-    rolling_adf_60d: pd.DataFrame,
+    rolling_adf_df: pd.DataFrame,
     mode: str = config.MODE,
 ) -> pd.DataFrame:
     """
-    Compute segment-level regime suppression flags using 60d ADF only.
+    Compute segment-level regime suppression flags.
 
-    NOTE: This is a dead variable kept for reference. Segment suppression
+    NOTE: This is dead code kept for reference. Segment suppression
     was removed from live entry/exit logic — each tenor is gated individually
-    by its own 60d ADF p-value. Do not use this in signal generation or
+    by its own rolling ADF p-value. Do not use this in signal generation or
     backtest entry/exit conditions.
 
     Logic: segment is suppressed if 2+ of its tenors have ADF p > 0.05.
@@ -485,8 +485,8 @@ def compute_segment_regime_df(
 
     Parameters
     ----------
-    rolling_adf_60d : pd.DataFrame
-        60-day rolling ADF p-values. rolling_adfs[60] from compute_rolling_adf().
+    rolling_adf_df : pd.DataFrame
+        Rolling ADF p-values. Any window from compute_rolling_adf().
     mode : str
         Data mode label. No branching.
 
@@ -500,10 +500,10 @@ def compute_segment_regime_df(
     regime = {}
 
     for seg_name, seg_tenors in segments.items():
-        n_nonstationary = (rolling_adf_60d[seg_tenors] > 0.05).sum(axis=1)
+        n_nonstationary = (rolling_adf_df[seg_tenors] > 0.05).sum(axis=1)
         regime[seg_name] = n_nonstationary >= 2
 
-    return pd.DataFrame(regime, index=rolling_adf_60d.index)
+    return pd.DataFrame(regime, index=rolling_adf_df.index)
 
 
 def compute_full_sample_stationarity(

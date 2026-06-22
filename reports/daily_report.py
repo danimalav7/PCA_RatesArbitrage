@@ -7,7 +7,9 @@
 # Contents:
 #   - Signal scan table (all 10 tenors, sorted by |Z|)
 #   - Z-score time series chart (all tenors, last 252 days)
-#   - Rolling 60d ADF p-value chart (all tenors)
+#     Z-score computed on 252d normalization window (level residuals)
+#   - Rolling 252d ADF p-value chart (all tenors)
+#     Entry gate window — changed from 60d (Sprint C-PROD-E)
 #   - Stationarity escalation summary table
 #   - Auction calendar suppression status
 # ============================================================================
@@ -24,7 +26,7 @@ import config
 def generate_daily_report(
     signal_scan: pd.DataFrame,
     z_score_df: pd.DataFrame,
-    rolling_adf_60d: pd.DataFrame,
+    rolling_adf_252d: pd.DataFrame,
     report_date: pd.Timestamp = None,
     output_dir: str = config.REPORT_OUTPUT_DIR,
     mode: str = config.MODE,
@@ -38,8 +40,10 @@ def generate_daily_report(
         Output of scan_signals() for the report date.
     z_score_df : pd.DataFrame
         Full Z-score history. Used for time series chart.
-    rolling_adf_60d : pd.DataFrame
-        Full 60d ADF p-value history. Used for stationarity chart.
+        Z-score computed on 252d normalization window (level residuals).
+    rolling_adf_252d : pd.DataFrame
+        Full 252d rolling ADF p-value history. Used for stationarity chart.
+        Changed from 60d — level residuals require 252d window for reliability.
     report_date : pd.Timestamp, optional
         Date of the report. Defaults to today.
     output_dir : str
@@ -116,8 +120,8 @@ def generate_daily_report(
         height=500,
     )
 
-    # ── Chart 2: Rolling 60d ADF p-values ────────────────────────────────────
-    adf_recent = rolling_adf_60d.tail(252)
+    # ── Chart 2: Rolling 252d ADF p-values ────────────────────────────────────
+    adf_recent = rolling_adf_252d.tail(252)
     fig_adf = go.Figure()
     for tenor in tenors:
         fig_adf.add_trace(go.Scatter(
@@ -140,8 +144,8 @@ def generate_daily_report(
             text=(
                 f'<b>Rolling {config.ADF_ENTRY_WINDOW}-Day ADF p-Values — '
                 f'All Tenors</b><br>'
-                f'Below dashed line: stationary regime | '
-                f'Last 252 trading days'
+                f'Below dashed line (p &lt; 0.05): stationary regime | '
+                f'Entry gate window | Last 252 trading days'
             ),
             x=0.5, font=dict(size=16)
         ),
