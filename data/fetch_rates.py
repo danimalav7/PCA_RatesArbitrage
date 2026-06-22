@@ -2,14 +2,63 @@
 # data/fetch_rates.py — Treasury yield curve data fetcher
 # ============================================================================
 # Fetches EOD Treasury rates from Federal Reserve via OpenBB.
-# Returns a clean DataFrame indexed by date with standardized tenor columns.
+# Falls back to direct FRED CSV download when OpenBB fixedincome extension
+# is not available (e.g. CLI environments without the federal_reserve provider).
 #
 # Intraday feed (IBKR) is handled in data/ibkr_feed.py — deferred to Sprint 4.
 # ============================================================================
 
 import datetime as dt
+import io
+import requests
 import pandas as pd
-from openbb import obb
+
+
+# ── FRED direct fallback ──────────────────────────────────────────────────────
+_FRED_SERIES = {
+    '1Mo':  'DGS1MO',
+    '3Mo':  'DGS3MO',
+    '6Mo':  'DGS6MO',
+    '1Yr':  'DGS1',
+    '2Yr':  'DGS2',
+    '3Yr':  'DGS3',
+    '5Yr':  'DGS5',
+    '7Yr':  'DGS7',
+    '10Yr': 'DGS10',
+    '30Yr': 'DGS30',
+}
+_FRED_BASE = 'https://fred.stlouisfed.org/graph/fredgraph.csv?id='
+
+
+def _fetch_fred_series(series_id: str, start_date: str, end_date: str) -> pd.Series:
+    url  = _FRED_BASE + series_id
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+    df = pd.read_csv(io.StringIO(resp.text))
+    df.columns = ['Date', 'value']
+    df['Date']  = pd.to_datetime(df['Date'])
+    df['value'] = pd.to_numeric(df['value'], errors='coerce') / 100.0  # pct → decimal
+    df = df.set_index('Date')['value'].sort_index()
+    if start_date:
+        df = df.loc[pd.Timestamp(start_date):]
+    if end_date:
+        df = df.loc[:pd.Timestamp(end_date)]
+    return df
+
+
+def _fetch_rates_fred(start_date: str, end_date: str) -> pd.DataFrame:
+    frames = {}
+    for tenor, series_id in _FRED_SERIES.items():
+        frames[tenor] = _fetch_fred_series(series_id, start_date, end_date)
+    df = pd.DataFrame(frames).dropna(how='all')
+    df = df.reset_index().rename(columns={'index': 'Date'})
+    df['FedFunds'] = float('nan')
+    df['SOFR']     = float('nan')
+    cols = ['Date', 'FedFunds', 'SOFR',
+            '1Mo', '3Mo', '6Mo', '1Yr', '2Yr', '3Yr', '5Yr', '7Yr', '10Yr', '30Yr']
+    df = df[cols].sort_values('Date').reset_index(drop=True)
+    df = df.dropna(subset=['1Mo'])
+    return df
 
 
 def FetchRates(
@@ -56,49 +105,52 @@ def FetchRates(
     if end_date is None:
         end_date = dt.datetime.today().strftime('%Y-%m-%d')
 
-    # ── Fetch from Federal Reserve via OpenBB ─────────────────────────────────
-    treasury_data = obb.fixedincome.government.treasury_rates(
-        start_date=start_date,
-        end_date=end_date,
-        provider='federal_reserve'
-    ).to_df()
+    # ── Try OpenBB first; fall back to direct FRED CSV if extension not loaded ─
+    rates_data = None
+    try:
+        from openbb import obb
+        if not hasattr(obb, 'fixedincome'):
+            raise ImportError("openbb fixedincome extension not loaded")
 
-    fed_funds = obb.fixedincome.rate.effr(
-        start_date=start_date,
-        end_date=end_date,
-        provider='federal_reserve'
-    ).to_df()[['rate']].rename(columns={'rate': 'FedFunds'})
+        treasury_data = obb.fixedincome.government.treasury_rates(
+            start_date=start_date,
+            end_date=end_date,
+            provider='federal_reserve'
+        ).to_df()
 
-    sofr_data = obb.fixedincome.rate.sofr(
-        start_date=start_date,
-        end_date=end_date,
-        provider='federal_reserve'
-    ).to_df()[['rate']].rename(columns={'rate': 'SOFR'})
+        fed_funds = obb.fixedincome.rate.effr(
+            start_date=start_date,
+            end_date=end_date,
+            provider='federal_reserve'
+        ).to_df()[['rate']].rename(columns={'rate': 'FedFunds'})
 
-    # ── Merge ─────────────────────────────────────────────────────────────────
-    rates_data = treasury_data.join([fed_funds, sofr_data], how='outer')
-    rates_data = rates_data.rename_axis('Date').reset_index()
+        sofr_data = obb.fixedincome.rate.sofr(
+            start_date=start_date,
+            end_date=end_date,
+            provider='federal_reserve'
+        ).to_df()[['rate']].rename(columns={'rate': 'SOFR'})
 
-    # ── Rename columns to standard tenor labels ───────────────────────────────
-    rates_data.rename(columns={
-        'month_1': '1Mo', 'month_2': '2Mo', 'month_3': '3Mo', 'month_6': '6Mo',
-        'year_1':  '1Yr', 'year_2':  '2Yr', 'year_3':  '3Yr',
-        'year_5':  '5Yr', 'year_7':  '7Yr', 'year_10': '10Yr', 'year_30': '30Yr'
-    }, inplace=True)
+        rates_data = treasury_data.join([fed_funds, sofr_data], how='outer')
+        rates_data = rates_data.rename_axis('Date').reset_index()
+        rates_data.rename(columns={
+            'month_1': '1Mo', 'month_2': '2Mo', 'month_3': '3Mo', 'month_6': '6Mo',
+            'year_1':  '1Yr', 'year_2':  '2Yr', 'year_3':  '3Yr',
+            'year_5':  '5Yr', 'year_7':  '7Yr', 'year_10': '10Yr', 'year_30': '30Yr'
+        }, inplace=True)
+        cols = ['Date', 'FedFunds', 'SOFR',
+                '1Mo', '3Mo', '6Mo', '1Yr', '2Yr', '3Yr', '5Yr', '7Yr', '10Yr', '30Yr']
+        rates_data = rates_data[cols].sort_values('Date').reset_index(drop=True)
+        rates_data = rates_data.dropna(subset=['FedFunds', '1Mo'])
+        rates_data['SOFR'] = rates_data['SOFR'].ffill()
+        print("  [FetchRates] source: OpenBB / federal_reserve")
 
-    # ── Select and sort ───────────────────────────────────────────────────────
-    cols = ['Date', 'FedFunds', 'SOFR',
-            '1Mo', '3Mo', '6Mo', '1Yr', '2Yr', '3Yr', '5Yr', '7Yr', '10Yr', '30Yr']
-    rates_data = rates_data[cols].sort_values('Date').reset_index(drop=True)
-
-    # ── Drop weekends and holidays (rows missing primary benchmarks) ──────────
-    rates_data = rates_data.dropna(subset=['FedFunds', '1Mo'])
-
-    # ── Forward fill SOFR for missing days ────────────────────────────────────
-    rates_data['SOFR'] = rates_data['SOFR'].ffill()
+    except Exception as obb_err:
+        print(f"  [FetchRates] OpenBB unavailable ({obb_err}); using FRED direct CSV")
+        rates_data = _fetch_rates_fred(start_date, end_date)
+        print("  [FetchRates] source: FRED direct CSV")
 
     # ── Validate ──────────────────────────────────────────────────────────────
-    if rates_data.empty:
+    if rates_data is None or rates_data.empty:
         raise ValueError(
             f"FetchRates returned empty DataFrame for "
             f"start_date={start_date}, end_date={end_date}, mode={mode}"

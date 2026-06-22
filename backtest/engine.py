@@ -516,10 +516,10 @@ def run_backtest(
                 -1 if trade['direction'] == 'LONG' else 1
             ) * config.YIELD_TO_BPS_SCALAR
             wt['daily_steps'].append({
-                'date':      res_date.strftime('%Y-%m-%d'),
-                'residual':  round(curr_res, 4),
-                'change':    round(change,   4),
-                'daily_pnl': round(daily_pnl_contribution, 4),
+                'date':         res_date.strftime('%Y-%m-%d'),
+                'residual_bps': round(curr_res * config.YIELD_TO_BPS_SCALAR, 2),
+                'change_bps':   round(change   * config.YIELD_TO_BPS_SCALAR, 2),
+                'daily_pnl':    round(daily_pnl_contribution, 4),
             })
         walkthroughs.append(wt)
     validation_checks['first_trades_walkthrough'] = walkthroughs
@@ -567,9 +567,9 @@ def run_backtest(
               f"P&L: {wt['pnl_bps']:>8.4f} bps | "
               f"${wt['pnl_dollars']:>10.2f}")
         for step in wt['daily_steps']:
-            print(f"      {step['date']}: Residual={step['residual']:>8.4f}, "
-                  f"Change={step['change']:>8.4f}, "
-                  f"DailyP&L={step['daily_pnl']:>8.4f}")
+            print(f"      {step['date']}: Residual={step['residual_bps']:>7.2f} bps, "
+                  f"Change={step['change_bps']:>7.2f} bps, "
+                  f"DailyP&L={step['daily_pnl']:>7.4f} bps")
     if walkthroughs:
         print(f"\n  ✓ First 3 trades manual verification complete")
 
