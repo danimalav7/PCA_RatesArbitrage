@@ -14,7 +14,7 @@
 # BIAS PREVENTION RULES (NON-NEGOTIABLE):
 # 1. Look-ahead bias: all signal computations on date T use data with index < T
 # 2. Transaction timing: signals generated at close T, trades entered at open T+1
-# 3. Z-score normalization: 60-day rolling mean/std excludes date T
+# 3. Z-score normalization: 252-day rolling mean/std excludes date T
 # 4. Stale data: no signals if rates_data missing data for date T
 # 5. No parameter optimization: all parameters fixed before backtest loop
 #
@@ -75,6 +75,9 @@ def run_backtest(
     rolling_adf_180d: pd.DataFrame,
     rolling_kpss_180d: pd.DataFrame,
     rolling_adfs: dict,
+    cumulative_variance_s: pd.Series,
+    rolling_acf_horizons_df: pd.DataFrame,
+    rates_data: pd.DataFrame,
     acf_summary_df: pd.DataFrame,
     auction_calendar: pd.DataFrame,
     get_auction_flag_fn: callable,
@@ -104,6 +107,19 @@ def run_backtest(
     rolling_adfs : dict
         All rolling ADF windows. Used for exit vote.
         Keys are window sizes (int).
+    cumulative_variance_s : pd.Series
+        PC1+PC2 cumulative explained variance ratio per date.
+        Output of compute_pca_residuals() second return value.
+        Used as entry gate: block if value <
+        config.CUMULATIVE_VARIANCE_THRESHOLD (0.80).
+    rolling_acf_horizons_df : pd.DataFrame
+        Rolling 252d ACF first-crossing lag per tenor per date.
+        Output of compute_rolling_acf_horizons().
+        Used for regime-aware time stop computation at entry.
+        Replaces static acf_horizons_map (now dead code).
+    rates_data : pd.DataFrame
+        Raw rates data from FetchRates(). Must contain FedFunds column.
+        Used to compute risk-free cost per trade for corrected Sharpe.
     acf_summary_df : pd.DataFrame
         ACF/PACF summary. Output of compute_acf_summary().
     auction_calendar : pd.DataFrame
@@ -120,6 +136,7 @@ def run_backtest(
         'positions'         : dict of still-open positions at end of backtest
         'trade_log'         : list of completed trade dicts
         'daily_pnl'         : pd.DataFrame of daily P&L in bps per tenor
+        'daily_positions'   : pd.DataFrame of position states per date and tenor
         'validation_checks' : dict of validation results
     """
     tenors         = config.TENORS
@@ -320,6 +337,20 @@ def run_backtest(
                     * 1000
                 )
 
+                # Compute average Fed Funds rate during hold period
+                # Used for corrected Sharpe (trade-level IR with rf deduction)
+                # rates_data must have FedFunds column in decimal form (e.g. 0.0533)
+                hold_mask = (
+                    (pd.to_datetime(rates_data['Date']) >= pos['entry_date'])
+                    & (pd.to_datetime(rates_data['Date']) <= current_date)
+                )
+                hold_rates = rates_data.loc[hold_mask, 'FedFunds'].dropna()
+                avg_fed_funds = float(hold_rates.mean()) if len(hold_rates) > 0 else 0.0
+
+                # Risk-free cost in bps for this trade
+                # rf_cost = avg_fed_funds_rate × (hold_days/252) × 10,000
+                rf_cost_bps = avg_fed_funds * (hold_days / 252) * config.YIELD_TO_BPS_SCALAR
+
                 trade_log.append({
                     'tenor':                  tenor,
                     'entry_date':             pos['entry_date'],
@@ -338,6 +369,11 @@ def run_backtest(
                     'pnl_bps':                pnl_bps,
                     'pnl_dollars':            pnl_dollars,
                     'transaction_cost_bps':   transaction_cost_bps * 2,
+                    'acf_horizon_days':       pos.get('acf_horizon_days', 20),
+                    'total_stop_days':        pos.get('total_stop_days', 40),
+                    'avg_fed_funds':          avg_fed_funds,
+                    'rf_cost_bps':            rf_cost_bps,
+                    'excess_return_bps':      pnl_bps - rf_cost_bps,
                 })
                 tenors_to_remove.append(tenor)
 
@@ -390,6 +426,19 @@ def run_backtest(
                 if not (adf_pass and kpss_pass):
                     continue
 
+                # Condition 2b: Cumulative variance gate
+                # Block entry if PC1+PC2 cumulative explained variance < threshold
+                # Indicates PCA is not reliably capturing yield curve structure
+                # Only applies when cumulative_variance_s has a valid value for date
+                cumvar = (
+                    float(cumulative_variance_s.loc[current_date])
+                    if current_date in cumulative_variance_s.index
+                    and not pd.isna(cumulative_variance_s.loc[current_date])
+                    else np.nan
+                )
+                if not np.isnan(cumvar) and cumvar < config.CUMULATIVE_VARIANCE_THRESHOLD:
+                    continue
+
                 # Condition 3: No existing position — checked by `if tenor in positions`
 
                 # Condition 4: Auction flag
@@ -405,9 +454,27 @@ def run_backtest(
                     signal_z + stop_loss_buffer if direction == 'LONG'
                     else signal_z - stop_loss_buffer
                 )
-                time_stop = execution_date + pd.Timedelta(
-                    days=acf_horizons_map[tenor]
-                    + time_stop_buffer_map[seg_name]
+
+                # Rolling 252d ACF horizon for this tenor on signal date
+                # Falls back to 20 trading days if not available
+                acf_horizon_td = (
+                    int(rolling_acf_horizons_df.loc[current_date, tenor])
+                    if current_date in rolling_acf_horizons_df.index
+                    and tenor in rolling_acf_horizons_df.columns
+                    and not pd.isna(
+                        rolling_acf_horizons_df.loc[current_date, tenor]
+                    )
+                    else 20
+                )
+                total_stop_days = acf_horizon_td + time_stop_buffer_map[seg_name]
+
+                # Convert trading days to calendar date using numpy busday_offset
+                time_stop = pd.Timestamp(
+                    np.busday_offset(
+                        execution_date.date(),
+                        total_stop_days,
+                        roll='forward'
+                    )
                 )
 
                 positions[tenor] = {
@@ -426,6 +493,8 @@ def run_backtest(
                         exec_residual if not np.isnan(exec_residual) else 0.0
                     ),
                     'cumulative_pnl_raw':   0.0,
+                    'acf_horizon_days':     acf_horizon_td,
+                    'total_stop_days':      total_stop_days,
                 }
 
         # ── SECTION C: DAILY P&L ACCUMULATION ────────────────────────────────
@@ -447,6 +516,28 @@ def run_backtest(
         daily_pnl.loc[current_date, 'TOTAL'] = (
             daily_pnl.loc[current_date, tenors].sum()
         )
+
+    # ── Build daily positions DataFrame ───────────────────────────────────────
+    # One row per date, one column per tenor
+    # Values: 'LONG' | 'SHORT' | 'No Position'
+    daily_positions = pd.DataFrame(
+        'No Position',
+        index=backtest_dates,
+        columns=tenors
+    )
+
+    for trade in trade_log:
+        tenor      = trade['tenor']
+        entry_date = trade['entry_date']
+        exit_date  = trade['exit_date']
+        direction  = trade['direction']
+        mask = (
+            (pd.Series(backtest_dates) >= entry_date) &
+            (pd.Series(backtest_dates) <= exit_date)
+        )
+        trade_dates = [d for d, m in zip(backtest_dates, mask) if m]
+        for d in trade_dates:
+            daily_positions.loc[d, tenor] = direction
 
     # ── VALIDATION CHECKS ─────────────────────────────────────────────────────
     validation_checks = {}
@@ -589,6 +680,7 @@ def run_backtest(
         'positions':         positions,
         'trade_log':         trade_log,
         'daily_pnl':         daily_pnl,
+        'daily_positions':   daily_positions,
         'validation_checks': validation_checks,
     }
 
@@ -836,9 +928,11 @@ def run_strategy_diagnostics(
               f"${row['net_pnl_usd']:>9,.0f}  "
               f"{row['hold_days']:>5}")
 
-    # ── Section 10: Sharpe by Tenor ───────────────────────────────────────────
+    # ── Section 10a: Active-Days Sharpe by Tenor (existing method, rf=0) ────────
     print(f"\n{SEP}")
-    print(f"  SECTION 10 — SHARPE RATIO BY TENOR (annualized, rf=0)")
+    print(f"  SECTION 10a — ACTIVE-DAYS SHARPE BY TENOR (rf=0, existing method)")
+    print(f"  Note: uses active trading days only as denominator.")
+    print(f"  Not comparable to overall Sharpe which uses all days.")
     print(f"{SEP}")
     print(f"  {'Tenor':<8}  {'Sharpe':>8}  {'AvgDailyUSD':>13}  "
           f"{'StdDailyUSD':>13}")
@@ -876,4 +970,62 @@ def run_strategy_diagnostics(
         if daily_pnl_dollars.std() > 0 else np.nan
     )
     print(f"  {'OVERALL':<8}  {overall_sharpe:>8.3f}")
-    print(f"\n{SEP}\n")
+
+    # ── Section 10b: Trade-Level IR with Fed Funds rf ─────────────────────────
+    print(f"\n{SEP}")
+    print(f"  SECTION 10b — TRADE-LEVEL IR (Fed Funds rf deduction)")
+    print(f"{SEP}")
+    print(f"  Formula: mean(excess_return) / std(excess_return)")
+    print(f"           × sqrt(trades_per_year)")
+    print(f"  Where:   excess_return = net_pnl_bps - rf_cost_bps")
+    print(f"           rf_cost_bps   = avg_FedFunds × (hold_days/252) × 10000")
+    print(f"  Units:   bps — no notional required")
+    print(f"{SEP}")
+
+    if 'rf_cost_bps' not in trade_log_df.columns:
+        print(f"  rf_cost_bps not found in trade log — "
+              f"run backtest with updated engine to populate")
+    else:
+        years_span = (
+            pd.to_datetime(trade_log_df['exit_date']).max() -
+            pd.to_datetime(trade_log_df['entry_date']).min()
+        ).days / 365.25
+        trades_per_year = len(trade_log_df) / years_span if years_span > 0 else 0
+
+        excess = trade_log_df['excess_return_bps']
+        if len(excess) >= 2 and excess.std() > 0:
+            overall_ir = (
+                excess.mean() / excess.std() * np.sqrt(trades_per_year)
+            )
+        else:
+            overall_ir = np.nan
+
+        print(f"  {'Tenor':<8}  {'IR':>8}  {'AvgExcess':>10}  "
+              f"{'StdExcess':>10}  {'AvgRFcost':>10}  {'N':>5}")
+        print(f"  {SEP2}")
+
+        for tenor in tenors_order:
+            sub = trade_log_df[trade_log_df['tenor'] == tenor]
+            if sub.empty:
+                continue
+            years_t = (
+                pd.to_datetime(sub['exit_date']).max() -
+                pd.to_datetime(sub['entry_date']).min()
+            ).days / 365.25
+            tpy = len(sub) / years_t if years_t > 0 else 0
+            exc = sub['excess_return_bps']
+            if len(exc) >= 2 and exc.std() > 0:
+                ir = exc.mean() / exc.std() * np.sqrt(tpy)
+            else:
+                ir = np.nan
+            print(f"  {tenor:<8}  {ir:>8.3f}  "
+                  f"{exc.mean():>10.3f}  "
+                  f"{exc.std():>10.3f}  "
+                  f"{sub['rf_cost_bps'].mean():>10.4f}  "
+                  f"{len(sub):>5}")
+
+        print(f"  {SEP2}")
+        print(f"  {'OVERALL':<8}  {overall_ir:>8.3f}  "
+              f"{excess.mean():>10.3f}  "
+              f"{excess.std():>10.3f}")
+        print(f"\n{SEP}\n")
