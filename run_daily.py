@@ -116,26 +116,16 @@ def main():
 
     # Step 12: Generate HTML report
     print("\nStep 12: Generating HTML report...")
-    try:
-        report_path = generate_daily_report(
-            signal_scan=signal_scan,
-            z_score_df=z_score_df,
-            rolling_adf_252d=rolling_adf_252d,
-            cumulative_variance_s=cumulative_variance_s,
-            backtest_results=backtest_results,
-            report_date=report_date,
-            output_dir=config.REPORT_OUTPUT_DIR,
-            mode=config.MODE,
-        )
-    except TypeError:
-        report_path = generate_daily_report(
-            signal_scan=signal_scan,
-            z_score_df=z_score_df,
-            rolling_adf_252d=rolling_adf_252d,
-            report_date=report_date,
-            output_dir=config.REPORT_OUTPUT_DIR,
-            mode=config.MODE,
-        )
+    report_path = generate_daily_report(
+        signal_scan=signal_scan,
+        z_score_df=z_score_df,
+        rolling_adf_252d=rolling_adf_252d,
+        cumulative_variance_s=cumulative_variance_s,
+        backtest_results=backtest_results,
+        report_date=report_date,
+        output_dir=config.REPORT_OUTPUT_DIR,
+        mode=config.MODE,
+    )
 
     print(f"\n{'='*60}")
     print(f"✓ Daily run complete — {report_date.date()}")
