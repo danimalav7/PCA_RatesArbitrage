@@ -26,6 +26,7 @@ _FRED_SERIES = {
     '7Yr':  'DGS7',
     '10Yr': 'DGS10',
     '30Yr': 'DGS30',
+    'FedFunds': 'DFF',
 }
 _FRED_BASE = 'https://fred.stlouisfed.org/graph/fredgraph.csv?id='
 
@@ -52,8 +53,14 @@ def _fetch_rates_fred(start_date: str, end_date: str) -> pd.DataFrame:
         frames[tenor] = _fetch_fred_series(series_id, start_date, end_date)
     df = pd.DataFrame(frames).dropna(how='all')
     df = df.reset_index().rename(columns={'index': 'Date'})
-    df['FedFunds'] = float('nan')
-    df['SOFR']     = float('nan')
+    # SOFR: not yet fetched from FRED — placeholder NaN column.
+    # Add SOFR fetch here when needed (FRED series: SOFR).
+    df['SOFR'] = float('nan')
+    # Forward fill FedFunds and SOFR for holidays and weekends where
+    # FRED does not publish values (e.g. Fed Funds not published on
+    # bank holidays). Use previous business day's value.
+    df['FedFunds'] = df['FedFunds'].ffill()
+    df['SOFR']     = df['SOFR'].ffill()
     cols = ['Date', 'FedFunds', 'SOFR',
             '1Mo', '3Mo', '6Mo', '1Yr', '2Yr', '3Yr', '5Yr', '7Yr', '10Yr', '30Yr']
     df = df[cols].sort_values('Date').reset_index(drop=True)
@@ -105,49 +112,59 @@ def FetchRates(
     if end_date is None:
         end_date = dt.datetime.today().strftime('%Y-%m-%d')
 
-    # ── Try OpenBB first; fall back to direct FRED CSV if extension not loaded ─
-    rates_data = None
-    try:
-        from openbb import obb
-        if not hasattr(obb, 'fixedincome'):
-            raise ImportError("openbb fixedincome extension not loaded")
+    # ── OpenBB (commented out — FRED is the active data source) ──────────────
+    # OpenBB code retained for reference. To re-enable, uncomment the block
+    # below and comment out the _fetch_rates_fred() call.
+    # Note: OpenBB requires the fixedincome extension and federal_reserve
+    # provider to be installed and configured.
+    # See live trading task log — replace with Bloomberg/Refinitiv in production.
+    #
+    # rates_data = None
+    # try:
+    #     from openbb import obb
+    #     if not hasattr(obb, 'fixedincome'):
+    #         raise ImportError("openbb fixedincome extension not loaded")
+    #
+    #     treasury_data = obb.fixedincome.government.treasury_rates(
+    #         start_date=start_date,
+    #         end_date=end_date,
+    #         provider='federal_reserve'
+    #     ).to_df()
+    #
+    #     fed_funds = obb.fixedincome.rate.effr(
+    #         start_date=start_date,
+    #         end_date=end_date,
+    #         provider='federal_reserve'
+    #     ).to_df()[['rate']].rename(columns={'rate': 'FedFunds'})
+    #
+    #     sofr_data = obb.fixedincome.rate.sofr(
+    #         start_date=start_date,
+    #         end_date=end_date,
+    #         provider='federal_reserve'
+    #     ).to_df()[['rate']].rename(columns={'rate': 'SOFR'})
+    #
+    #     rates_data = treasury_data.join([fed_funds, sofr_data], how='outer')
+    #     rates_data = rates_data.rename_axis('Date').reset_index()
+    #     rates_data.rename(columns={
+    #         'month_1': '1Mo', 'month_2': '2Mo', 'month_3': '3Mo', 'month_6': '6Mo',
+    #         'year_1':  '1Yr', 'year_2':  '2Yr', 'year_3':  '3Yr',
+    #         'year_5':  '5Yr', 'year_7':  '7Yr', 'year_10': '10Yr', 'year_30': '30Yr'
+    #     }, inplace=True)
+    #     cols = ['Date', 'FedFunds', 'SOFR',
+    #             '1Mo', '3Mo', '6Mo', '1Yr', '2Yr', '3Yr', '5Yr', '7Yr', '10Yr', '30Yr']
+    #     rates_data = rates_data[cols].sort_values('Date').reset_index(drop=True)
+    #     rates_data = rates_data.dropna(subset=['FedFunds', '1Mo'])
+    #     rates_data['SOFR'] = rates_data['SOFR'].ffill()
+    #     print("  [FetchRates] source: OpenBB / federal_reserve")
+    #
+    # except Exception as obb_err:
+    #     print(f"  [FetchRates] OpenBB unavailable ({obb_err}); using FRED direct CSV")
+    #     rates_data = _fetch_rates_fred(start_date, end_date)
+    #     print("  [FetchRates] source: FRED direct CSV")
 
-        treasury_data = obb.fixedincome.government.treasury_rates(
-            start_date=start_date,
-            end_date=end_date,
-            provider='federal_reserve'
-        ).to_df()
-
-        fed_funds = obb.fixedincome.rate.effr(
-            start_date=start_date,
-            end_date=end_date,
-            provider='federal_reserve'
-        ).to_df()[['rate']].rename(columns={'rate': 'FedFunds'})
-
-        sofr_data = obb.fixedincome.rate.sofr(
-            start_date=start_date,
-            end_date=end_date,
-            provider='federal_reserve'
-        ).to_df()[['rate']].rename(columns={'rate': 'SOFR'})
-
-        rates_data = treasury_data.join([fed_funds, sofr_data], how='outer')
-        rates_data = rates_data.rename_axis('Date').reset_index()
-        rates_data.rename(columns={
-            'month_1': '1Mo', 'month_2': '2Mo', 'month_3': '3Mo', 'month_6': '6Mo',
-            'year_1':  '1Yr', 'year_2':  '2Yr', 'year_3':  '3Yr',
-            'year_5':  '5Yr', 'year_7':  '7Yr', 'year_10': '10Yr', 'year_30': '30Yr'
-        }, inplace=True)
-        cols = ['Date', 'FedFunds', 'SOFR',
-                '1Mo', '3Mo', '6Mo', '1Yr', '2Yr', '3Yr', '5Yr', '7Yr', '10Yr', '30Yr']
-        rates_data = rates_data[cols].sort_values('Date').reset_index(drop=True)
-        rates_data = rates_data.dropna(subset=['FedFunds', '1Mo'])
-        rates_data['SOFR'] = rates_data['SOFR'].ffill()
-        print("  [FetchRates] source: OpenBB / federal_reserve")
-
-    except Exception as obb_err:
-        print(f"  [FetchRates] OpenBB unavailable ({obb_err}); using FRED direct CSV")
-        rates_data = _fetch_rates_fred(start_date, end_date)
-        print("  [FetchRates] source: FRED direct CSV")
+    # ── FRED direct CSV (active data source) ─────────────────────────────────
+    rates_data = _fetch_rates_fred(start_date, end_date)
+    print("  [FetchRates] source: FRED direct CSV")
 
     # ── Validate ──────────────────────────────────────────────────────────────
     if rates_data is None or rates_data.empty:
