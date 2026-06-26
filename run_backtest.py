@@ -26,7 +26,7 @@ from analytics.stationarity import (
 )
 from signals.zscore import compute_zscore
 from backtest.engine import run_backtest, run_strategy_diagnostics
-from run_daily import fetch_auction_calendar, get_auction_suppression_flag
+from data.auction import fetch_auction_calendar, get_auction_suppression_flag
 
 
 def main():
