@@ -49,6 +49,12 @@ Z_EXIT_THRESHOLD    = 0.5     # mean reversion exit: LONG exits at Z <= +0.5, SH
                               # Captures ~83% of mean reversion (Z=3.0 → Z=0.5)
                               # without waiting for full overshoot to opposite side
                               # Entry at Z=3.0, exit at Z=0.5 → 2.5σ of reversion captured
+# Minimum cumulative explained variance by PC1+PC2.
+# If PC1+PC2 cumulative variance drops below this threshold, signal is flagged.
+# Default 0.80 — in normal regimes PC1+PC2 explains 83-99% of yield curve variance.
+# Crisis periods can see this drop to 65-73% — below 0.80 PCA is not reliably
+# capturing the curve and residuals may reflect noise rather than tradeable dislocations.
+CUMULATIVE_VARIANCE_THRESHOLD = 0.80
 
 # ── Stationarity ──────────────────────────────────────────────────────────────
 # Level residuals require longer windows than change residuals because:
@@ -78,6 +84,7 @@ KPSS_ENTRY_THRESHOLD     = 0.05               # KPSS p-value threshold (unchange
                                               # Both tested on 252d rolling window
 VOTE_EXIT_THRESHOLD      = 0                  # exit if vote_count == 0
                                               # For [180d, 252d]: both must flag non-stationary
+# DEAD CODE — PC3 gate removed in Sprint D5. Kept for reference only. Do not use in logic.
 PC3_ELEVATED_THRESHOLD   = 0.15               # PC3 variance threshold (unchanged)
                                               # Heuristic — refine after level residual backtest
 
@@ -175,3 +182,54 @@ AUCTION_SUPPRESS_DAYS = {
 
 # ── Reporting ─────────────────────────────────────────────────────────────────
 REPORT_OUTPUT_DIR = 'reports/output'
+
+
+def config_validate():
+    errors = []
+
+    if not set(EXIT_ADF_WINDOWS).issubset(set(ROLLING_ADF_WINDOWS)):
+        errors.append(
+            f"EXIT_ADF_WINDOWS {EXIT_ADF_WINDOWS} must be a subset of "
+            f"ROLLING_ADF_WINDOWS {ROLLING_ADF_WINDOWS}."
+        )
+
+    if Z_EXIT_THRESHOLD >= Z_ENTRY_THRESHOLD:
+        errors.append(
+            f"Z_EXIT_THRESHOLD ({Z_EXIT_THRESHOLD}) must be strictly less than "
+            f"Z_ENTRY_THRESHOLD ({Z_ENTRY_THRESHOLD})."
+        )
+
+    if STOP_LOSS_BUFFER <= 0:
+        errors.append(
+            f"STOP_LOSS_BUFFER ({STOP_LOSS_BUFFER}) must be > 0."
+        )
+
+    if REVERSION_ELIGIBLE_BUFFER >= Z_ENTRY_THRESHOLD:
+        errors.append(
+            f"REVERSION_ELIGIBLE_BUFFER ({REVERSION_ELIGIBLE_BUFFER}) must be strictly less than "
+            f"Z_ENTRY_THRESHOLD ({Z_ENTRY_THRESHOLD})."
+        )
+
+    if not (0.5 <= CUMULATIVE_VARIANCE_THRESHOLD <= 1.0):
+        errors.append(
+            f"CUMULATIVE_VARIANCE_THRESHOLD ({CUMULATIVE_VARIANCE_THRESHOLD}) must be between "
+            f"0.5 and 1.0."
+        )
+
+    if ADF_ENTRY_WINDOW not in ROLLING_ADF_WINDOWS:
+        errors.append(
+            f"ADF_ENTRY_WINDOW ({ADF_ENTRY_WINDOW}) must be in "
+            f"ROLLING_ADF_WINDOWS {ROLLING_ADF_WINDOWS}."
+        )
+
+    invalid_exit_windows = [w for w in EXIT_ADF_WINDOWS if w < 180]
+    if invalid_exit_windows:
+        errors.append(
+            f"EXIT_ADF_WINDOWS contains values below 180: {invalid_exit_windows}. "
+            f"Windows below 180 have insufficient statistical power for level residuals."
+        )
+
+    if errors:
+        raise ValueError("config validation failed:\n" + "\n".join(f"  - {e}" for e in errors))
+
+    print("config validation passed")
