@@ -16,9 +16,6 @@
 
 import numpy as np
 import pandas as pd
-from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
-import warnings
 import config
 from analytics.stationarity import get_stationarity_vote
 
@@ -83,6 +80,7 @@ def generate_signal_card(
     rolling_adfs: dict,
     rolling_adf_252d: pd.DataFrame,
     rolling_kpss_252d: pd.DataFrame,
+    cumulative_variance_s: pd.Series,
     acf_summary_df: pd.DataFrame,
     auction_calendar: pd.DataFrame,
     segment_regime_df: pd.DataFrame,
@@ -110,6 +108,12 @@ def generate_signal_card(
         Passed separately for convenience since it's used for entry gate.
     rolling_kpss_252d : pd.DataFrame
         252-day rolling KPSS p-values. Used alongside rolling_adf_252d for entry gate.
+    cumulative_variance_s : pd.Series
+        PC1+PC2 cumulative explained variance ratio per date.
+        Output of compute_pca_residuals() second return value.
+        Used as signal quality gate: flag if value on date <
+        config.CUMULATIVE_VARIANCE_THRESHOLD (0.80).
+        Replaces PC3 gate removed in Sprint D5.
     acf_summary_df : pd.DataFrame
         ACF/PACF summary. Output of compute_acf_summary().
     auction_calendar : pd.DataFrame
@@ -263,34 +267,30 @@ def generate_signal_card(
         if not np.isnan(acf_horizon) else 'N/A'
     )
 
-    # ── 6. PC3 variance overlay ───────────────────────────────────────────────
-    pc3_var = np.nan
-    if date in residuals_df.index:
-        date_idx = residuals_df.index.get_loc(date)
-        pca_window = config.PCA_WINDOW
-        if date_idx >= pca_window:
-            window_data = residuals_df.iloc[date_idx - pca_window:date_idx]
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter('ignore')
-                    scaler  = StandardScaler()
-                    scaled  = scaler.fit_transform(
-                        window_data[config.TENORS]
-                    )
-                    pca_3   = PCA(n_components=3)
-                    pca_3.fit(scaled)
-                    pc3_var = (
-                        pca_3.explained_variance_ratio_[2]
-                        if pca_3.n_components_ >= 3 else np.nan
-                    )
-            except Exception:
-                pc3_var = np.nan
-
-    card['pc3_explained_variance'] = (
-        float(pc3_var) if not np.isnan(pc3_var) else np.nan
+    # ── 6. Cumulative explained variance gate ─────────────────────────────────
+    # Replaces PC3 gate (removed Sprint D5).
+    # PC3 was computed incorrectly on residuals_df with StandardScaler.
+    # cumulative_variance_s is pre-computed upstream on raw yield levels
+    # in compute_pca_residuals() — correct scaling, no refit needed here.
+    cumvar = (
+        float(cumulative_variance_s.loc[date])
+        if date in cumulative_variance_s.index
+        and not pd.isna(cumulative_variance_s.loc[date])
+        else np.nan
     )
-    pc3_elevated = not np.isnan(pc3_var) and pc3_var > config.PC3_ELEVATED_THRESHOLD
-    card['pc3_elevated_flag'] = pc3_elevated
+    card['cumulative_variance'] = cumvar
+    cumvar_low = (
+        not np.isnan(cumvar)
+        and cumvar < config.CUMULATIVE_VARIANCE_THRESHOLD
+    )
+    card['cumulative_variance_low_flag'] = cumvar_low
+
+    # DEAD CODE — PC3 fields kept for reference only. Do not use in logic.
+    # PC3 gate removed Sprint D5. pc3_explained_variance was computed
+    # incorrectly on residuals_df using StandardScaler instead of
+    # vol-normalized raw yield levels. See config.PC3_ELEVATED_THRESHOLD.
+    card['pc3_explained_variance'] = np.nan
+    card['pc3_elevated_flag']      = False
 
     # ── 7. Overall trade eligibility ──────────────────────────────────────────
     blocked_reasons = []
@@ -299,8 +299,10 @@ def generate_signal_card(
         blocked_reasons.append('AUCTION-SUPPRESS')
     if tenor_stationarity in ('NON-STATIONARY', 'AMBIGUOUS', 'UNKNOWN'):
         blocked_reasons.append(f'STATIONARITY-{tenor_stationarity}')
-    if pc3_elevated:
-        blocked_reasons.append('PC3-ELEVATED')
+    if cumvar_low:
+        blocked_reasons.append(
+            f'LOW-CUMVAR({cumvar:.3f}<{config.CUMULATIVE_VARIANCE_THRESHOLD})'
+        )
     if signal_direction == 'FLAT':
         blocked_reasons.append('FLAT-SIGNAL')
 
@@ -330,6 +332,7 @@ def scan_signals(
     rolling_adfs: dict,
     rolling_adf_252d: pd.DataFrame,
     rolling_kpss_252d: pd.DataFrame,
+    cumulative_variance_s: pd.Series,
     acf_summary_df: pd.DataFrame,
     auction_calendar: pd.DataFrame,
     segment_regime_df: pd.DataFrame,
@@ -343,6 +346,9 @@ def scan_signals(
     ----------
     date : pd.Timestamp
         Date to scan.
+    cumulative_variance_s : pd.Series
+        PC1+PC2 cumulative explained variance ratio per date.
+        Passed through to generate_signal_card() for signal quality gate.
     All other parameters are passed through to generate_signal_card().
     mode : str
         Data mode. Default: config.MODE.
@@ -362,6 +368,7 @@ def scan_signals(
             rolling_adfs=rolling_adfs,
             rolling_adf_252d=rolling_adf_252d,
             rolling_kpss_252d=rolling_kpss_252d,
+            cumulative_variance_s=cumulative_variance_s,
             acf_summary_df=acf_summary_df,
             auction_calendar=auction_calendar,
             segment_regime_df=segment_regime_df,
