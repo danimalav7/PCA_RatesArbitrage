@@ -33,6 +33,13 @@
 #   ACF first crossing at 15-25 days confirms tradeable mean-reversion horizon
 #
 # Plotting functions excluded — runs headlessly in run_daily.py
+#
+# Returns: tuple of (residuals_df, cumulative_variance_s)
+#   residuals_df          — pd.DataFrame, decimal yield units, shape (n_dates, 10)
+#   cumulative_variance_s — pd.Series, PC1+PC2 cumulative explained variance ratio,
+#                           shape (n_dates,), NaN for first `window` rows
+#                           Used as signal quality gate: flag if <
+#                           config.CUMULATIVE_VARIANCE_THRESHOLD (0.80)
 # ============================================================================
 
 import numpy as np
@@ -118,6 +125,8 @@ def compute_pca_residuals(
         dtype=float
     )
 
+    variance_records = {}
+
     print(f"\nRolling PCA — vol-normalized yield levels")
     print(f"  Window={window}d | n_components={n_components} | Mode={mode}")
     print(f"  Approach: level PCA with tenor-specific vol normalization")
@@ -147,11 +156,16 @@ def compute_pca_residuals(
                 pca = PCA(n_components=n_components)
                 pca.fit(scaled_window)
 
+                # Store cumulative explained variance (PC1+PC2) for this date
+                # Used downstream as a signal quality gate in signals/zscore.py
+                # Replaces PC3 threshold gate (removed Sprint D5)
+                ev            = pca.explained_variance_ratio_
+                cumulative_ev = ev[:n_components].sum()
+                variance_records[current_date] = cumulative_ev
+
                 # ── Log explained variance annually ────────────────────────────
                 if i == window or (i - window) % 252 == 0:
-                    ev            = pca.explained_variance_ratio_
-                    cumulative_ev = ev[:n_components].sum()
-                    pc_str        = '  '.join(
+                    pc_str = '  '.join(
                         f'PC{j+1}={ev[j]*100:.1f}%'
                         for j in range(n_components)
                     )
@@ -173,4 +187,12 @@ def compute_pca_residuals(
             except Exception:
                 residuals.loc[current_date] = np.nan
 
-    return residuals.astype(float)
+    cumulative_variance = pd.Series(
+        variance_records,
+        name='cumulative_variance',
+        dtype=float
+    )
+    # Reindex to match residuals index so NaN warmup rows are included
+    cumulative_variance = cumulative_variance.reindex(residuals.index)
+
+    return residuals.astype(float), cumulative_variance
