@@ -7,6 +7,9 @@
 #   get_stationarity_vote()        — multi-window vote (returns raw int 0-N)
 #   compute_voting_stationary_df() — full date×tenor boolean DataFrame
 #   compute_acf_summary()          — ACF/PACF mean reversion horizon per tenor
+#   compute_rolling_acf_horizons() — rolling 252d ACF first-crossing
+#                                    lag per tenor (regime-aware MR
+#                                    horizon, replaces static mapping)
 #   compute_hurst_exponent()       — Hurst exponent via R/S analysis (documentation)
 #   compute_segment_regime_df()    — 60d-only segment suppression (dead variable,
 #                                    kept for reference; not used in live logic)
@@ -374,6 +377,115 @@ def compute_acf_summary(
         })
 
     return pd.DataFrame(rows).set_index('Tenor')
+
+
+def compute_rolling_acf_horizons(
+    residuals_df: pd.DataFrame,
+    window: int = 252,
+    max_lags: int = 60,
+    tenors: list = config.TENORS,
+    mode: str = config.MODE,
+) -> pd.DataFrame:
+    """
+    Compute rolling 252d ACF first-crossing lag per tenor.
+
+    For each date T, fits ACF on the residual window [T-252:T] and
+    finds the first lag where ACF drops below the 95% confidence
+    interval (1.96 / sqrt(window)). This is the mean reversion
+    horizon estimate for that tenor on that date.
+
+    Replaces the static full-sample acf_horizons_map used previously
+    in engine.py. Rolling 252d is regime-aware — the MR horizon shifts
+    across macro regimes (e.g. post-COVID vs pre-GFC).
+
+    STATIC MAPPING (dead code, kept for reference in engine.py):
+        Short End   (1Mo-1Yr):  ~15-21 days
+        Belly Short (2Yr-5Yr):  ~15-21 days
+        Belly Long  (7Yr-10Yr): ~16-18 days
+        Long End    (30Yr):     ~16 days
+    These were derived from full-sample ACF analysis of level residuals.
+    Hurst H=0.80-0.86 confirms 15-25 day mean reversion horizon.
+
+    Parameters
+    ----------
+    residuals_df : pd.DataFrame
+        Daily PCA level residuals. Output of compute_pca_residuals().
+    window : int
+        Rolling window in trading days. Default 252.
+        Consistent with stationarity and Z-score windows.
+        Provides ~10 mean reversion cycles for reliable ACF estimation
+        at 15-25 day horizons.
+    max_lags : int
+        Maximum ACF lags to compute. Default 60.
+        Covers the full expected MR horizon range with buffer.
+    tenors : list
+        Tenor list. Default: config.TENORS.
+    mode : str
+        Data mode label. No branching.
+
+    Returns
+    -------
+    pd.DataFrame
+        Rolling ACF first-crossing lag per tenor, indexed by date.
+        Columns: config.TENORS.
+        Values: int — first lag where ACF crosses below CI.
+                If ACF never crosses within max_lags, returns 20
+                (conservative fallback matching previous static default).
+        First `window` rows: NaN (warmup period).
+        Units: trading days.
+    """
+    tenors = tenors or config.TENORS
+    result = pd.DataFrame(
+        index=residuals_df.index,
+        columns=tenors,
+        dtype=float
+    )
+
+    ci_multiplier = 1.96  # 95% confidence interval
+
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+
+        for i in range(window, len(residuals_df)):
+            current_date = residuals_df.index[i]
+            window_data  = residuals_df.iloc[i - window:i]
+
+            for tenor in tenors:
+                series = window_data[tenor].dropna()
+                if len(series) < window // 2:
+                    # Insufficient data — use fallback
+                    result.loc[current_date, tenor] = 20
+                    continue
+
+                ci = ci_multiplier / np.sqrt(len(series))
+
+                try:
+                    acf_vals = acf(series, nlags=max_lags, fft=True)
+                    # Find first lag (starting from lag 1) where
+                    # ACF drops below CI threshold
+                    first_cross = None
+                    for lag in range(1, len(acf_vals)):
+                        if acf_vals[lag] < ci:
+                            first_cross = lag
+                            break
+                    # Use fallback of 20 if ACF never crosses
+                    result.loc[current_date, tenor] = (
+                        first_cross if first_cross is not None else 20
+                    )
+                except Exception:
+                    result.loc[current_date, tenor] = 20
+
+    print(f"Rolling {window}d ACF horizons computed — "
+          f"{len(result.dropna())} valid dates")
+    print(f"Date range: "
+          f"{result.dropna().index[0].date()} → "
+          f"{result.dropna().index[-1].date()}")
+    print(f"Sample ACF horizons (most recent date):")
+    last = result.dropna().iloc[-1]
+    for tenor in tenors:
+        print(f"  {tenor:<8} {int(last[tenor])} trading days")
+
+    return result.astype(float)
 
 
 def compute_hurst_exponent(

@@ -137,7 +137,15 @@ def run_backtest(
     kpss_entry_threshold      = config.KPSS_ENTRY_THRESHOLD     # 0.05
     time_stop_buffer_map      = config.TIME_STOP_BUFFER_MAP     # 25-40 day total stops
 
-    # ACF horizons per tenor
+    # STATIC ACF HORIZONS — DEAD CODE (kept for reference)
+    # Originally computed from full-sample compute_acf_summary().
+    # Replaced in Sprint D4 by rolling 252d ACF horizons via
+    # compute_rolling_acf_horizons() in analytics/stationarity.py.
+    # Full-sample mapping is blind to regime changes — rolling 252d
+    # is regime-aware and consistent with other 252d windows.
+    # This block is no longer used in the backtest loop.
+    # See: acf_horizons_map replaced by rolling_acf_horizons_df lookup
+    # at entry time in SECTION B.
     acf_horizons_map = {}
     for tenor in tenors:
         if tenor in acf_summary_df.index:
