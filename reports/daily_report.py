@@ -14,7 +14,9 @@
 #   - Only rendered if backtest_results pickle is loaded by run_daily.py
 #   - KPI cards: Total Trades, Net P&L, Overall Sharpe (10b), MR Exit Rate
 #   - P&L by tenor (Plotly horizontal bar, gross vs net)
-#   - Sharpe table: 10a active-days (rf=0) and 10b trade-level IR side by side
+#   - Sharpe table: Section 10c overlay IR — annualized excess return
+#     and Sharpe ratio per tenor, all-days denominator, Fed Funds rf
+#     on active days only (overlay on T-bill position)
 #   - Exit reason breakdown (Plotly vertical bar)
 #   - Year-by-year net P&L (Plotly vertical bar, green/red)
 #   - Daily positions heatmap (last 252 trading days, Plotly)
@@ -46,7 +48,9 @@ def _sharpe_bg(v):
         return '#d4edda'
     if f >= 1.0:
         return '#fff3cd'
-    return '#f8d7da'
+    if f >= 0:
+        return '#f8d7da'
+    return '#f5c6cb'
 
 
 def generate_daily_report(
@@ -175,7 +179,7 @@ def generate_daily_report(
             padding: 8px 12px; border-bottom: 1px solid #dee2e6;
         }
         .metric-grid {
-            display: grid; grid-template-columns: repeat(4, 1fr);
+            display: grid; grid-template-columns: repeat(5, 1fr);
             gap: 16px; margin-bottom: 24px;
         }
         .metric-card {
@@ -344,20 +348,20 @@ def generate_daily_report(
             net_pnl  = round(float(tdf['pnl_bps'].sum()), 1)
             mr_rate  = f"{(tdf['exit_reason'] == 'MEAN-REVERSION').mean() * 100:.1f}%"
 
-            # Overall IR (10b method)
-            if 'excess_return_bps' in tdf.columns and n_trades >= 2:
-                exc_all  = tdf['excess_return_bps']
-                yr_span  = (
-                    pd.to_datetime(tdf['exit_date']).max()
-                    - pd.to_datetime(tdf['entry_date']).min()
-                ).days / 365.25
-                if yr_span > 0 and float(exc_all.std()) > 0:
-                    tpy_all    = n_trades / yr_span
-                    overall_ir = f"{(exc_all.mean() / exc_all.std()) * math.sqrt(tpy_all):.2f}"
-                else:
-                    overall_ir = 'N/A'
-            else:
-                overall_ir = 'N/A'
+            # Extract Section 10c Sharpe for KPI cards
+            sharpe_10c_kpi = 'N/A'
+            ann_excess_kpi = 'N/A'
+            exc_series = backtest_results.get('excess_returns_bps')
+            if exc_series is not None and len(exc_series) > 0:
+                n_days_bt  = len(exc_series)
+                n_years_bt = n_days_bt / 252
+                mean_e     = exc_series.mean()
+                std_e      = exc_series.std()
+                if std_e > 0:
+                    sharpe_10c_kpi = f"{(mean_e / std_e) * np.sqrt(252):.3f}"
+                total_e = exc_series.sum()
+                if n_years_bt > 0:
+                    ann_excess_kpi = f"{total_e / n_years_bt:.1f} bps/yr"
 
             # ── KPI metric cards (metric-grid) ────────────────────────────────
             kpi_html = f"""
@@ -371,8 +375,12 @@ def generate_daily_report(
             <div class="label">Net P&amp;L (bps)</div>
         </div>
         <div class="metric-card">
-            <div class="value">{overall_ir}</div>
-            <div class="label">Overall Sharpe (10b)</div>
+            <div class="value">{ann_excess_kpi}</div>
+            <div class="label">Ann. Excess Return</div>
+        </div>
+        <div class="metric-card">
+            <div class="value">{sharpe_10c_kpi}</div>
+            <div class="label">Sharpe (10c)</div>
         </div>
         <div class="metric-card">
             <div class="value">{mr_rate}</div>
@@ -410,10 +418,7 @@ def generate_daily_report(
             )
             chart_a_html = fig_a.to_html(full_html=False, include_plotlyjs=False)
 
-            # ── Sharpe table (10a active-days + 10b trade-level IR) ───────────
-            dv01_map     = config.DV01_MAP
-            notional_map = config.NOTIONAL_MAP
-
+            # ── Sharpe table: Section 10c overlay IR ─────────────────────────
             def _fmt(v, dp=2):
                 try:
                     f = float(v)
@@ -421,67 +426,100 @@ def generate_daily_report(
                 except (TypeError, ValueError):
                     return 'N/A'
 
+            # Extract rates_data for FedFunds per-tenor lookup
+            rates_ff_df = backtest_results.get('rates_data', None)
+            if rates_ff_df is not None and 'FedFunds' in rates_ff_df.columns:
+                rates_ff_idx = rates_ff_df.copy()
+                rates_ff_idx['Date'] = pd.to_datetime(rates_ff_idx['Date'])
+                rates_ff_idx = rates_ff_idx.set_index('Date')['FedFunds']
+            else:
+                rates_ff_idx = None
+
+            n_days_total  = len(daily_pnl) if isinstance(daily_pnl, pd.DataFrame) else 0
+            n_years_total = n_days_total / 252 if n_days_total > 0 else 1
+
             sharpe_rows = ''
             for t in tenors:
                 sub = tdf[tdf['tenor'] == t]
-                n_t = len(sub)
 
-                # 10a: active-days Sharpe (rf=0)
+                # Build per-tenor excess returns (Section 10c method)
                 try:
                     if isinstance(daily_pnl, pd.DataFrame) and t in daily_pnl.columns:
-                        tdp = daily_pnl[t]
-                    elif isinstance(daily_pnl, dict) and t in daily_pnl:
-                        tdp = pd.Series(daily_pnl[t])
+                        tenor_pnl    = daily_pnl[t]
+                        tenor_excess = pd.Series(0.0, index=daily_pnl.index)
+                        active_mask  = (tenor_pnl != 0.0)
+                        for date in daily_pnl.index:
+                            if active_mask.loc[date]:
+                                pnl = float(tenor_pnl.loc[date])
+                                if rates_ff_idx is not None and date in rates_ff_idx.index:
+                                    ff = float(rates_ff_idx.loc[date])
+                                    ff = 0.0 if pd.isna(ff) else ff
+                                else:
+                                    ff = 0.0
+                                rf_bps = (ff / 252) * config.YIELD_TO_BPS_SCALAR
+                                tenor_excess.loc[date] = pnl - rf_bps
+                        t_total   = tenor_excess.sum()
+                        t_ann     = t_total / n_years_total
+                        t_active  = int(active_mask.sum())
+                        t_mean    = tenor_excess.mean()
+                        t_std     = tenor_excess.std()
+                        s10c      = (
+                            (t_mean / t_std) * np.sqrt(252)
+                            if t_std > 0 else np.nan
+                        )
                     else:
-                        tdp = pd.Series(dtype=float)
-                    t_usd  = tdp * dv01_map.get(t, 0) * (notional_map.get(t, 0) / 1e6) * 1000
-                    active = t_usd[t_usd != 0]
-                    s10a   = (
-                        (active.mean() / active.std()) * math.sqrt(252)
-                        if len(active) >= 2 and float(active.std()) > 0 else np.nan
-                    )
+                        t_total = t_ann = np.nan
+                        t_active = 'N/A'
+                        s10c = np.nan
                 except Exception:
-                    s10a = np.nan
-
-                # 10b: trade-level IR (Fed Funds rf deduction)
-                try:
-                    if 'excess_return_bps' in tdf.columns and n_t >= 2:
-                        exc_t = sub['excess_return_bps']
-                        yr_t  = (
-                            pd.to_datetime(sub['exit_date']).max()
-                            - pd.to_datetime(sub['entry_date']).min()
-                        ).days / 365.25
-                        if yr_t > 0 and float(exc_t.std()) > 0:
-                            s10b = (exc_t.mean() / exc_t.std()) * math.sqrt(n_t / yr_t)
-                        else:
-                            s10b = np.nan
-                    else:
-                        s10b = np.nan
-                except Exception:
-                    s10b = np.nan
-
-                rf_avg = (
-                    float(sub['rf_cost_bps'].mean())
-                    if 'rf_cost_bps' in tdf.columns else np.nan
-                )
+                    t_total = t_ann = np.nan
+                    t_active = 'N/A'
+                    s10c = np.nan
 
                 sharpe_rows += f"""
             <tr>
                 <td>{t}</td>
-                <td>{n_t}</td>
-                <td style="background:{_sharpe_bg(s10a)}">{_fmt(s10a)}</td>
-                <td style="background:{_sharpe_bg(s10b)}">{_fmt(s10b)}</td>
-                <td>{_fmt(rf_avg)}</td>
+                <td>{t_active}</td>
+                <td>{_fmt(t_ann, 1)}</td>
+                <td>{_fmt(t_total, 1)}</td>
+                <td style="background:{_sharpe_bg(s10c)}">{_fmt(s10c)}</td>
+            </tr>"""
+
+            # TOTAL row using portfolio-level excess_returns_bps
+            if exc_series is not None and len(exc_series) > 0:
+                tot_n_days  = len(exc_series)
+                tot_n_years = tot_n_days / 252
+                tot_total   = exc_series.sum()
+                tot_ann     = tot_total / tot_n_years
+                tot_active  = int((exc_series != 0).sum())
+                tot_mean    = exc_series.mean()
+                tot_std     = exc_series.std()
+                tot_sharpe  = (
+                    (tot_mean / tot_std) * np.sqrt(252)
+                    if tot_std > 0 else np.nan
+                )
+            else:
+                tot_ann = tot_total = np.nan
+                tot_active = 'N/A'
+                tot_sharpe = np.nan
+
+            sharpe_rows += f"""
+            <tr style="font-weight:bold;border-top:2px solid #343a40">
+                <td>TOTAL</td>
+                <td>{tot_active}</td>
+                <td>{_fmt(tot_ann, 1)}</td>
+                <td>{_fmt(tot_total, 1)}</td>
+                <td style="background:{_sharpe_bg(tot_sharpe)}">{_fmt(tot_sharpe)}</td>
             </tr>"""
 
             sharpe_table_html = f"""
     <table class="sharpe-table">
         <thead>
             <tr>
-                <th>Tenor</th><th>Trades</th>
-                <th>10a Sharpe (active-days, rf=0)</th>
-                <th>10b IR (trade-level, Fed Funds rf)</th>
-                <th>Avg RF Cost (bps)</th>
+                <th>Tenor</th><th>Active Days</th>
+                <th>Ann. Excess (bps/yr)</th>
+                <th>Total Excess (bps)</th>
+                <th>Sharpe (10c)</th>
             </tr>
         </thead>
         <tbody>{sharpe_rows}</tbody>
@@ -620,7 +658,7 @@ def generate_daily_report(
     {kpi_html}
     <h3>P&amp;L by Tenor</h3>
     <div class="chart-container">{chart_a_html}</div>
-    <h3>Sharpe Ratios</h3>
+    <h3>Sharpe Ratios — Strategy Overlay IR (Section 10c)</h3>
     {sharpe_table_html}
     <h3>Exit Reason Breakdown</h3>
     <div class="chart-container">{chart_b_html}</div>

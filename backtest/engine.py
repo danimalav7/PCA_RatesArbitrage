@@ -137,6 +137,8 @@ def run_backtest(
         'trade_log'         : list of completed trade dicts
         'daily_pnl'         : pd.DataFrame of daily P&L in bps per tenor
         'daily_positions'   : pd.DataFrame of position states per date and tenor
+        'excess_returns_bps': pd.Series — daily excess returns in bps (overlay framework)
+        'rates_data'        : pd.DataFrame — raw rates data passed through for diagnostics
         'validation_checks' : dict of validation results
     """
     tenors         = config.TENORS
@@ -539,6 +541,39 @@ def run_backtest(
         for d in trade_dates:
             daily_positions.loc[d, tenor] = direction
 
+    # ── Build excess returns Series (overlay framework) ───────────────────────
+    # Strategy is treated as an overlay on a T-bill position.
+    # On active days: excess = strategy P&L - rf cost (Fed Funds)
+    # On inactive days: excess = 0 (strategy matches T-bill benchmark)
+    # Denominator for Sharpe: ALL backtest days (not just active days)
+    #
+    # rf_daily_bps[T] = (FedFunds[T] / 252) × 10,000
+    # excess[T] = daily_pnl['TOTAL'][T] - rf_daily_bps[T]  if active
+    #           = 0.0                                        if inactive
+
+    # Build FedFunds lookup aligned to backtest dates
+    rates_indexed = rates_data.copy()
+    rates_indexed['Date'] = pd.to_datetime(rates_indexed['Date'])
+    rates_indexed = rates_indexed.set_index('Date')['FedFunds']
+
+    excess_returns_bps = pd.Series(0.0, index=backtest_dates)
+
+    for date in backtest_dates:
+        total_pnl = daily_pnl.loc[date, 'TOTAL']
+        is_active  = (total_pnl != 0.0)
+
+        if is_active:
+            fed_funds = (
+                float(rates_indexed.loc[date])
+                if date in rates_indexed.index
+                and not pd.isna(rates_indexed.loc[date])
+                else 0.0
+            )
+            rf_daily_bps = (fed_funds / 252) * config.YIELD_TO_BPS_SCALAR
+            excess_returns_bps.loc[date] = total_pnl - rf_daily_bps
+        else:
+            excess_returns_bps.loc[date] = 0.0
+
     # ── VALIDATION CHECKS ─────────────────────────────────────────────────────
     validation_checks = {}
     n_trades_opened = len(trade_log)
@@ -677,11 +712,13 @@ def run_backtest(
     print(f"{'='*80}\n")
 
     return {
-        'positions':         positions,
-        'trade_log':         trade_log,
-        'daily_pnl':         daily_pnl,
-        'daily_positions':   daily_positions,
-        'validation_checks': validation_checks,
+        'positions':           positions,
+        'trade_log':           trade_log,
+        'daily_pnl':           daily_pnl,
+        'daily_positions':     daily_positions,
+        'excess_returns_bps':  excess_returns_bps,
+        'rates_data':          rates_data,
+        'validation_checks':   validation_checks,
     }
 
 
@@ -708,8 +745,9 @@ def run_strategy_diagnostics(
     z_entry_threshold : float
         Entry Z-score threshold used in the backtest. Default: config.Z_ENTRY_THRESHOLD.
     """
-    trade_log_df = pd.DataFrame(backtest_results['trade_log'])
-    daily_pnl    = backtest_results['daily_pnl']
+    trade_log_df       = pd.DataFrame(backtest_results['trade_log'])
+    daily_pnl          = backtest_results['daily_pnl']
+    excess_returns_bps = backtest_results.get('excess_returns_bps', None)
 
     if trade_log_df.empty:
         print("No trades to analyze.")
@@ -971,6 +1009,12 @@ def run_strategy_diagnostics(
     )
     print(f"  {'OVERALL':<8}  {overall_sharpe:>8.3f}")
 
+    # DEAD CODE — Section 10b (trade-level IR) replaced by Section 10c
+    # (strategy overlay IR). Kept for reference only.
+    # Section 10b applied rf cost at trade level using avg Fed Funds
+    # during hold period — incorrect framing for an overlay strategy.
+    # See Section 10c for the correct calculation.
+
     # ── Section 10b: Trade-Level IR with Fed Funds rf ─────────────────────────
     print(f"\n{SEP}")
     print(f"  SECTION 10b — TRADE-LEVEL IR (Fed Funds rf deduction)")
@@ -1028,4 +1072,104 @@ def run_strategy_diagnostics(
         print(f"  {'OVERALL':<8}  {overall_ir:>8.3f}  "
               f"{excess.mean():>10.3f}  "
               f"{excess.std():>10.3f}")
+        print(f"\n{SEP}\n")
+
+    # ── Section 10c: Strategy Overlay IR ─────────────────────────────────────
+    print(f"\n{SEP}")
+    print(f"  SECTION 10c — STRATEGY OVERLAY IR (correct Sharpe)")
+    print(f"{SEP}")
+    print(f"  Framework: strategy treated as overlay on T-bill position")
+    print(f"  Active days:   excess = strategy P&L (bps) - rf_daily (bps)")
+    print(f"  Inactive days: excess = 0.0 (strategy matches T-bill benchmark)")
+    print(f"  Denominator:   ALL {len(daily_pnl)} backtest days")
+    print(f"  rf_daily_bps   = FedFunds_rate / 252 × 10,000")
+    print(f"{SEP}")
+
+    if excess_returns_bps is None:
+        print(f"  excess_returns_bps not found in backtest_results.")
+        print(f"  Re-run backtest with updated engine to populate.")
+    else:
+        n_days      = len(excess_returns_bps)
+        n_active    = (excess_returns_bps != 0).sum()
+        n_years     = n_days / 252
+
+        # Annualized excess return
+        total_excess      = excess_returns_bps.sum()
+        annualized_excess = total_excess / n_years
+
+        # Sharpe — mean/std × sqrt(252) over ALL days
+        mean_excess = excess_returns_bps.mean()
+        std_excess  = excess_returns_bps.std()
+        sharpe_10c  = (
+            (mean_excess / std_excess) * np.sqrt(252)
+            if std_excess > 0 else np.nan
+        )
+
+        print(f"  Backtest period:          {n_days} trading days "
+              f"({n_years:.1f} years)")
+        print(f"  Active days:              {n_active} "
+              f"({n_active/n_days*100:.1f}%)")
+        print(f"  Total excess return:      {total_excess:.2f} bps")
+        print(f"  Annualized excess return: {annualized_excess:.2f} bps/year")
+        print(f"  Mean daily excess:        {mean_excess:.4f} bps/day")
+        print(f"  Std daily excess:         {std_excess:.4f} bps/day")
+        print(f"  Sharpe ratio (10c):       {sharpe_10c:.3f}")
+        print(f"\n  Interpretation:")
+        print(f"    Starting with $10,000 in T-bills on backtest start date,")
+        print(f"    this strategy generated an additional "
+              f"{annualized_excess:.1f} bps/year")
+        print(f"    above the T-bill return, with a Sharpe of "
+              f"{sharpe_10c:.3f}.")
+        print(f"\n  Per-tenor overlay IR:")
+        print(f"  {'Tenor':<8}  {'AnnExcess':>10}  {'Sharpe':>8}  "
+              f"{'ActiveDays':>10}  {'TotalExcess':>12}")
+        print(f"  {SEP2}")
+
+        # Build O(1) FedFunds index — set_index once outside the loop
+        # Matches daily_report.py implementation for consistency
+        rates_ff_raw = backtest_results.get('rates_data', None)
+        if (rates_ff_raw is not None
+                and 'FedFunds' in rates_ff_raw.columns):
+            rates_ff_idx = rates_ff_raw.copy()
+            rates_ff_idx['Date'] = pd.to_datetime(rates_ff_idx['Date'])
+            rates_ff_idx = rates_ff_idx.set_index('Date')['FedFunds']
+        else:
+            rates_ff_idx = None
+
+        for tenor in tenors_order:
+            if tenor not in daily_pnl.columns:
+                continue
+
+            tenor_pnl    = daily_pnl[tenor]
+            tenor_excess = pd.Series(0.0, index=daily_pnl.index)
+            active_mask  = (tenor_pnl != 0.0)
+
+            for date in daily_pnl.index:
+                if active_mask.loc[date]:
+                    pnl = float(tenor_pnl.loc[date])
+                    if (rates_ff_idx is not None
+                            and date in rates_ff_idx.index):
+                        ff = float(rates_ff_idx.loc[date])
+                        ff = 0.0 if pd.isna(ff) else ff
+                    else:
+                        ff = 0.0
+                    rf_bps = (ff / 252) * config.YIELD_TO_BPS_SCALAR
+                    tenor_excess.loc[date] = pnl - rf_bps
+
+            t_total  = tenor_excess.sum()
+            t_ann    = t_total / n_years
+            t_active = active_mask.sum()
+            t_mean   = tenor_excess.mean()
+            t_std    = tenor_excess.std()
+            t_sharpe = (
+                (t_mean / t_std) * np.sqrt(252)
+                if t_std > 0 else np.nan
+            )
+            print(f"  {tenor:<8}  {t_ann:>10.2f}  {t_sharpe:>8.3f}  "
+                  f"{t_active:>10}  {t_total:>12.2f}")
+
+        print(f"  {SEP2}")
+        print(f"  {'TOTAL':<8}  {annualized_excess:>10.2f}  "
+              f"{sharpe_10c:>8.3f}  {n_active:>10}  "
+              f"{total_excess:>12.2f}")
         print(f"\n{SEP}\n")
