@@ -7,3 +7,6 @@ outputs/
 *.pyc
 __pycache__/
 backtest_output.txt
+reports/output/
+logs/
+*.pkl
