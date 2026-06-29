@@ -44,7 +44,7 @@ ZSCORE_WINDOW       = 252     # rolling window for Z-score normalization
                               # Changed from 60d (change residuals) to 252d (level residuals)
                               # Level residuals require longer window — 15-25 day MR horizon
                               # needs 10+ cycles for reliable mean/std estimation
-Z_ENTRY_THRESHOLD   = 3.0     # |Z| must exceed this to generate a signal
+Z_ENTRY_THRESHOLD   = 2.0     # |Z| must exceed this to generate a signal
 Z_EXIT_THRESHOLD    = 0.5     # mean reversion exit: LONG exits at Z <= +0.5, SHORT at Z >= -0.5
                               # Captures ~83% of mean reversion (Z=3.0 → Z=0.5)
                               # without waiting for full overshoot to opposite side
