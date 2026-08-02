@@ -45,6 +45,28 @@ ZSCORE_WINDOW       = 252     # rolling window for Z-score normalization
                               # Level residuals require longer window — 15-25 day MR horizon
                               # needs 10+ cycles for reliable mean/std estimation
 Z_ENTRY_THRESHOLD   = 2.0     # |Z| must exceed this to generate a signal
+# ── Per-tenor Z-score entry thresholds ───────────────────────────────────
+# Derived from per-tenor Section 10c overlay IR analysis at Z=2.0:
+#   Positive overlay IR tenors (7Yr, 30Yr, 6Mo, 2Yr) → Z=2.0
+#   Borderline tenors (1Yr, 5Yr, 10Yr) → Z=2.5
+#   Negative overlay IR tenors (1Mo, 3Mo, 3Yr) → Z=3.0
+#
+# Z_ENTRY_THRESHOLD above is retained as:
+#   (a) Fallback for any tenor not present in this map
+#   (b) Reference baseline for run_sensitivity.py scale mode
+#   Do NOT remove Z_ENTRY_THRESHOLD — it is still used as fallback.
+Z_ENTRY_THRESHOLD_MAP = {
+    '1Mo':  3.0,   # negative overlay IR at Z=2.0 (-0.078 Sharpe)
+    '3Mo':  3.0,   # worst short-end overlay IR  (-0.263 Sharpe)
+    '6Mo':  2.0,   # positive overlay IR          (+0.068 Sharpe)
+    '1Yr':  2.5,   # borderline                   (-0.165 Sharpe)
+    '2Yr':  2.0,   # positive overlay IR          (+0.075 Sharpe)
+    '3Yr':  3.0,   # most negative overlay IR     (-0.532 Sharpe)
+    '5Yr':  2.5,   # borderline                   (-0.219 Sharpe)
+    '7Yr':  2.0,   # best overlay IR              (+0.319 Sharpe)
+    '10Yr': 2.5,   # borderline                   (-0.113 Sharpe)
+    '30Yr': 2.0,   # strong positive overlay IR   (+0.161 Sharpe)
+}
 Z_EXIT_THRESHOLD    = 0.5     # mean reversion exit: LONG exits at Z <= +0.5, SHORT at Z >= -0.5
                               # Captures ~83% of mean reversion (Z=3.0 → Z=0.5)
                               # without waiting for full overshoot to opposite side
@@ -227,6 +249,34 @@ def config_validate():
         errors.append(
             f"EXIT_ADF_WINDOWS contains values below 180: {invalid_exit_windows}. "
             f"Windows below 180 have insufficient statistical power for level residuals."
+        )
+
+    # Check Z_ENTRY_THRESHOLD_MAP covers all tenors
+    missing_tenors = [
+        t for t in TENORS if t not in Z_ENTRY_THRESHOLD_MAP
+    ]
+    if missing_tenors:
+        errors.append(
+            f"Z_ENTRY_THRESHOLD_MAP missing tenors: {missing_tenors}. "
+            f"All 10 tenors must be present."
+        )
+
+    # Check all map values are in valid range [1.5, 5.0]
+    invalid_map = {
+        t: v for t, v in Z_ENTRY_THRESHOLD_MAP.items()
+        if not (1.5 <= v <= 5.0)
+    }
+    if invalid_map:
+        errors.append(
+            f"Z_ENTRY_THRESHOLD_MAP values out of range [1.5, 5.0]: "
+            f"{invalid_map}"
+        )
+
+    # Check fallback Z_ENTRY_THRESHOLD is in valid range
+    if not (1.5 <= Z_ENTRY_THRESHOLD <= 5.0):
+        errors.append(
+            f"Z_ENTRY_THRESHOLD={Z_ENTRY_THRESHOLD} out of range "
+            f"[1.5, 5.0]."
         )
 
     if errors:

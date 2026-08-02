@@ -304,10 +304,13 @@ def generate_daily_report(
             adf_str = f"{float(adf_p):.4f}" if not pd.isna(adf_p) else 'N/A'
         except (TypeError, ValueError):
             adf_str = 'N/A'
+        z_thresh_val = row.get('z_threshold_used', config.Z_ENTRY_THRESHOLD)
+        z_thresh_str = f"{z_thresh_val:.1f}"
         table_rows += f"""
             <tr style="background:{bg}">
                 <td>{row['tenor']}</td>
                 <td>{row['z_score']:.3f}</td>
+                <td>{z_thresh_str}</td>
                 <td>{row.get('signal_direction', '')}</td>
                 <td>{row.get('bond_status') or '—'}</td>
                 <td>{adf_str}</td>
@@ -709,6 +712,7 @@ def generate_daily_report(
             <tr>
                 <th>Tenor</th>
                 <th>Z-Score</th>
+                <th>Z Thresh</th>
                 <th>Direction</th>
                 <th>Status</th>
                 <th>ADF p (252d)</th>

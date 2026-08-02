@@ -39,6 +39,19 @@ from data.auction import get_auction_suppression_flag
 # Higher values → fewer trades, higher conviction entries.
 Z_THRESHOLD_VALUES = [2.0, 2.25, 2.5, 2.75, 3.0]
 
+# ── Sweep mode ────────────────────────────────────────────────────────────
+# 'replace' : sets all tenors to the same sweep value uniformly
+#             → answers "what if all tenors had threshold X?"
+# 'scale'   : multiplies each tenor's production map value by a ratio
+#             sweep_value / Z_ENTRY_THRESHOLD (global fallback as reference)
+#             → answers "what if I shift the entire threshold curve by X%?"
+#             e.g. sweep_value=2.5, production 7Yr=2.0, 3Mo=3.0
+#             scale_factor = 2.5/3.0 = 0.833
+#             → 7Yr: 2.0×0.833=1.667, 3Mo: 3.0×0.833=2.5
+#             floor at MIN_THRESHOLD_FLOOR to prevent unsafe values
+SWEEP_MODE = 'replace'   # 'replace' | 'scale'
+MIN_THRESHOLD_FLOOR = 1.5  # minimum allowed threshold in scale mode
+
 # Metrics to collect per run
 # All metrics computed from backtest_results dict
 METRICS = [
@@ -151,6 +164,56 @@ def compute_metrics_from_results(
     }
 
 
+def build_threshold_map_for_sweep(
+    sweep_z: float,
+    mode: str = SWEEP_MODE,
+) -> dict:
+    """
+    Build a Z_ENTRY_THRESHOLD_MAP for a given sweep value.
+
+    Parameters
+    ----------
+    sweep_z : float
+        The Z threshold value being tested in this sweep iteration.
+    mode : str
+        'replace' : all tenors set to sweep_z uniformly.
+        'scale'   : each tenor's production map value scaled by
+                    sweep_z / config.Z_ENTRY_THRESHOLD (global fallback
+                    used as reference denominator).
+                    Result floored at MIN_THRESHOLD_FLOOR.
+
+    Returns
+    -------
+    dict
+        Z_ENTRY_THRESHOLD_MAP to use for this sweep run.
+        All 10 tenors present.
+    """
+    if mode == 'replace':
+        return {tenor: sweep_z for tenor in config.TENORS}
+
+    elif mode == 'scale':
+        reference = config.Z_ENTRY_THRESHOLD  # global fallback as denominator
+        if reference <= 0:
+            raise ValueError(
+                f"Z_ENTRY_THRESHOLD={reference} must be > 0 for scale mode"
+            )
+        scale_factor = sweep_z / reference
+        scaled_map = {}
+        for tenor in config.TENORS:
+            base = config.Z_ENTRY_THRESHOLD_MAP.get(
+                tenor, config.Z_ENTRY_THRESHOLD
+            )
+            scaled_val = max(MIN_THRESHOLD_FLOOR, round(base * scale_factor, 4))
+            scaled_map[tenor] = scaled_val
+        return scaled_map
+
+    else:
+        raise ValueError(
+            f"SWEEP_MODE='{mode}' not recognised. "
+            f"Use 'replace' or 'scale'."
+        )
+
+
 def print_comparison_table(results_list: list):
     """
     Print a formatted comparison table to terminal.
@@ -166,6 +229,10 @@ def print_comparison_table(results_list: list):
 
     print(f"\n{SEP}")
     print(f"  SENSITIVITY SWEEP — Z_ENTRY_THRESHOLD")
+    print(f"  Sweep mode: {SWEEP_MODE.upper()}")
+    print(f"  Production Z_ENTRY_THRESHOLD_MAP:")
+    for t, v in config.Z_ENTRY_THRESHOLD_MAP.items():
+        print(f"    {t:<8} {v}")
     print(f"  Current production value: {config.Z_ENTRY_THRESHOLD}")
     print(f"  Values tested: {Z_THRESHOLD_VALUES}")
     print(f"{SEP}")
@@ -403,12 +470,14 @@ def main():
     print(f"  {'-'*55}")
 
     results_list = []
-    original_z   = config.Z_ENTRY_THRESHOLD
+    original_z_global = config.Z_ENTRY_THRESHOLD
+    original_z_map    = config.Z_ENTRY_THRESHOLD_MAP.copy()
 
     for z_val in Z_THRESHOLD_VALUES:
-        # Override Z_ENTRY_THRESHOLD at runtime
-        # Does not modify config.py on disk
-        config.Z_ENTRY_THRESHOLD = z_val
+        sweep_map = build_threshold_map_for_sweep(z_val, mode=SWEEP_MODE)
+
+        config.Z_ENTRY_THRESHOLD     = z_val
+        config.Z_ENTRY_THRESHOLD_MAP = sweep_map
 
         try:
             backtest_results = run_backtest(
@@ -434,7 +503,8 @@ def main():
             print(f"  Z={z_val:<10}  "
                   f"{metrics['total_trades']:>8}  "
                   f"{metrics['net_pnl_bps']:>10.2f}  "
-                  f"{metrics['sharpe_10c']:>8.3f}  ✓")
+                  f"{metrics['sharpe_10c']:>8.3f}  "
+                  f"[{SWEEP_MODE}] ✓")
 
         except Exception as e:
             print(f"  Z={z_val:<10}  ERROR: {e}")
@@ -444,12 +514,15 @@ def main():
             })
 
         finally:
-            # Always restore original value
-            config.Z_ENTRY_THRESHOLD = original_z
+            # Always restore both global and map
+            config.Z_ENTRY_THRESHOLD     = original_z_global
+            config.Z_ENTRY_THRESHOLD_MAP = original_z_map
 
-    # Restore original value explicitly after loop
-    config.Z_ENTRY_THRESHOLD = original_z
-    print(f"\n  config.Z_ENTRY_THRESHOLD restored to {original_z}")
+    # Explicit restore after loop
+    config.Z_ENTRY_THRESHOLD     = original_z_global
+    config.Z_ENTRY_THRESHOLD_MAP = original_z_map
+    print(f"\n  Config restored — Z_ENTRY_THRESHOLD={original_z_global}, "
+          f"Z_ENTRY_THRESHOLD_MAP restored to production values")
 
     # ── Step 3: Print comparison table ────────────────────────────────────
     print("\nStep 3: Printing comparison table...")
