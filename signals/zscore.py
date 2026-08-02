@@ -157,27 +157,31 @@ def generate_signal_card(
     # Signal direction
     # Z > +threshold: yield ABOVE fair value → CHEAP → LONG (yield falls)
     # Z < -threshold: yield BELOW fair value → RICH  → SHORT (yield rises)
-    threshold = config.Z_ENTRY_THRESHOLD
+    # Per-tenor threshold — falls back to global if tenor not in map
+    threshold = config.Z_ENTRY_THRESHOLD_MAP.get(
+        tenor, config.Z_ENTRY_THRESHOLD
+    )
     if np.isnan(z_score):
         signal_direction = 'FLAT'
-        bond_status = None
-        expected_move = None
+        bond_status      = None
+        expected_move    = None
     elif z_score > threshold:
         signal_direction = 'LONG'
-        bond_status = 'CHEAP'
-        expected_move = 'YIELD_FALLS'
+        bond_status      = 'CHEAP'
+        expected_move    = 'YIELD_FALLS'
     elif z_score < -threshold:
         signal_direction = 'SHORT'
-        bond_status = 'RICH'
-        expected_move = 'YIELD_RISES'
+        bond_status      = 'RICH'
+        expected_move    = 'YIELD_RISES'
     else:
         signal_direction = 'FLAT'
-        bond_status = None
-        expected_move = None
+        bond_status      = None
+        expected_move    = None
 
-    card['signal_direction'] = signal_direction
-    card['bond_status']      = bond_status
-    card['expected_move']    = expected_move
+    card['signal_direction']  = signal_direction
+    card['bond_status']       = bond_status
+    card['expected_move']     = expected_move
+    card['z_threshold_used']  = threshold
 
     # ── 2. Stationarity regime ────────────────────────────────────────────────
     # Entry gate: dual ADF + KPSS (both 252d rolling)

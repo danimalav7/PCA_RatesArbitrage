@@ -376,6 +376,7 @@ def run_backtest(
                     'avg_fed_funds':          avg_fed_funds,
                     'rf_cost_bps':            rf_cost_bps,
                     'excess_return_bps':      pnl_bps - rf_cost_bps,
+                    'z_threshold_used':       pos.get('z_threshold_used', config.Z_ENTRY_THRESHOLD),
                 })
                 tenors_to_remove.append(tenor)
 
@@ -410,12 +411,16 @@ def run_backtest(
                 )
 
                 # Condition 1: Z threshold — checked at T (signal date), not T+1
-                if np.isnan(signal_z) or abs(signal_z) <= z_entry_threshold:
+                # Per-tenor Z threshold — falls back to global if tenor not in map
+                z_thresh = config.Z_ENTRY_THRESHOLD_MAP.get(
+                    tenor, config.Z_ENTRY_THRESHOLD
+                )
+                if np.isnan(signal_z) or abs(signal_z) < z_thresh:
                     continue
 
                 direction = (
-                    'LONG'  if signal_z >  z_entry_threshold else
-                    'SHORT' if signal_z < -z_entry_threshold else None
+                    'LONG'  if signal_z >  z_thresh else
+                    'SHORT' if signal_z < -z_thresh else None
                 )
                 if direction is None:
                     continue
@@ -497,6 +502,7 @@ def run_backtest(
                     'cumulative_pnl_raw':   0.0,
                     'acf_horizon_days':     acf_horizon_td,
                     'total_stop_days':      total_stop_days,
+                    'z_threshold_used':     z_thresh,
                 }
 
         # ── SECTION C: DAILY P&L ACCUMULATION ────────────────────────────────
@@ -625,19 +631,20 @@ def run_backtest(
         residuals_in_trade = residuals_df.loc[mask, tenor]
 
         wt = {
-            'trade_num':      trade_idx + 1,
-            'tenor':          tenor,
-            'direction':      trade['direction'],
-            'entry_date':     entry_date.strftime('%Y-%m-%d'),
-            'entry_zscore':   round(trade['entry_zscore'], 3),
-            'entry_residual': round(trade['entry_residual_bps'], 4),
-            'exit_date':      exit_date.strftime('%Y-%m-%d'),
-            'exit_reason':    trade['exit_reason'],
-            'exit_residual':  round(trade['exit_residual_bps'], 4),
-            'hold_days':      trade['hold_days'],
-            'pnl_bps':        round(trade['pnl_bps'], 4),
-            'pnl_dollars':    round(trade['pnl_dollars'], 2),
-            'daily_steps':    [],
+            'trade_num':        trade_idx + 1,
+            'tenor':            tenor,
+            'direction':        trade['direction'],
+            'entry_date':       entry_date.strftime('%Y-%m-%d'),
+            'entry_zscore':     round(trade['entry_zscore'], 3),
+            'entry_residual':   round(trade['entry_residual_bps'], 4),
+            'z_threshold_used': round(trade.get('z_threshold_used', config.Z_ENTRY_THRESHOLD), 2),
+            'exit_date':        exit_date.strftime('%Y-%m-%d'),
+            'exit_reason':      trade['exit_reason'],
+            'exit_residual':    round(trade['exit_residual_bps'], 4),
+            'hold_days':        trade['hold_days'],
+            'pnl_bps':          round(trade['pnl_bps'], 4),
+            'pnl_dollars':      round(trade['pnl_dollars'], 2),
+            'daily_steps':      [],
         }
         for i, res_date in enumerate(residuals_in_trade.index):
             prev_res = (
@@ -694,6 +701,7 @@ def run_backtest(
     for wt in walkthroughs:
         print(f"\n  Trade {wt['trade_num']}: {wt['tenor']} {wt['direction']}")
         print(f"    Entry: {wt['entry_date']} @ Z={wt['entry_zscore']:>7.3f}, "
+              f"Threshold={wt['z_threshold_used']:.2f}, "
               f"Residual={wt['entry_residual']:>8.4f} bps")
         print(f"    Exit:  {wt['exit_date']} ({wt['exit_reason']}) @ "
               f"Residual={wt['exit_residual']:>8.4f} bps")
