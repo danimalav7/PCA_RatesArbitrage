@@ -154,34 +154,50 @@ def generate_signal_card(
     )
     card['z_score'] = z_score
 
-    # Signal direction
-    # Z > +threshold: yield ABOVE fair value → CHEAP → LONG (yield falls)
-    # Z < -threshold: yield BELOW fair value → RICH  → SHORT (yield rises)
-    # Per-tenor threshold — falls back to global if tenor not in map
-    threshold = config.Z_ENTRY_THRESHOLD_MAP.get(
-        tenor, config.Z_ENTRY_THRESHOLD
-    )
-    if np.isnan(z_score):
+    # ── Exclusion check ───────────────────────────────────────────────────
+    # Tenors in EXCLUDED_TENORS are blocked regardless of Z-score.
+    # They still appear in the signal scan table with EXCLUDED status
+    # so the user can monitor their Z-scores without trading them.
+    if tenor in config.EXCLUDED_TENORS:
         signal_direction = 'FLAT'
         bond_status      = None
         expected_move    = None
-    elif z_score > threshold:
-        signal_direction = 'LONG'
-        bond_status      = 'CHEAP'
-        expected_move    = 'YIELD_FALLS'
-    elif z_score < -threshold:
-        signal_direction = 'SHORT'
-        bond_status      = 'RICH'
-        expected_move    = 'YIELD_RISES'
+        card['signal_direction']  = signal_direction
+        card['bond_status']       = bond_status
+        card['expected_move']     = expected_move
+        card['z_threshold_used']  = None
+        card['trade_eligibility'] = 'EXCLUDED — negative overlay IR at all thresholds'
+        # Still populate all other card fields for monitoring
+        # Fall through to compute stationarity, auction, cumvar etc.
     else:
-        signal_direction = 'FLAT'
-        bond_status      = None
-        expected_move    = None
+        # Signal direction
+        # Z > +threshold: yield ABOVE fair value → CHEAP → LONG (yield falls)
+        # Z < -threshold: yield BELOW fair value → RICH  → SHORT (yield rises)
+        # Per-tenor threshold — falls back to global if tenor not in map
+        threshold = config.Z_ENTRY_THRESHOLD_MAP.get(
+            tenor, config.Z_ENTRY_THRESHOLD
+        )
+        if np.isnan(z_score):
+            signal_direction = 'FLAT'
+            bond_status      = None
+            expected_move    = None
+        elif z_score > threshold:
+            signal_direction = 'LONG'
+            bond_status      = 'CHEAP'
+            expected_move    = 'YIELD_FALLS'
+        elif z_score < -threshold:
+            signal_direction = 'SHORT'
+            bond_status      = 'RICH'
+            expected_move    = 'YIELD_RISES'
+        else:
+            signal_direction = 'FLAT'
+            bond_status      = None
+            expected_move    = None
 
-    card['signal_direction']  = signal_direction
-    card['bond_status']       = bond_status
-    card['expected_move']     = expected_move
-    card['z_threshold_used']  = threshold
+        card['signal_direction']  = signal_direction
+        card['bond_status']       = bond_status
+        card['expected_move']     = expected_move
+        card['z_threshold_used']  = threshold
 
     # ── 2. Stationarity regime ────────────────────────────────────────────────
     # Entry gate: dual ADF + KPSS (both 252d rolling)
@@ -297,34 +313,36 @@ def generate_signal_card(
     card['pc3_elevated_flag']      = False
 
     # ── 7. Overall trade eligibility ──────────────────────────────────────────
-    blocked_reasons = []
+    # Skip eligibility logic for excluded tenors — trade_eligibility already set above
+    if tenor not in config.EXCLUDED_TENORS:
+        blocked_reasons = []
 
-    if auction_flag == 'SUPPRESS':
-        blocked_reasons.append('AUCTION-SUPPRESS')
-    if tenor_stationarity in ('NON-STATIONARY', 'AMBIGUOUS', 'UNKNOWN'):
-        blocked_reasons.append(f'STATIONARITY-{tenor_stationarity}')
-    if cumvar_low:
-        blocked_reasons.append(
-            f'LOW-CUMVAR({cumvar:.3f}<{config.CUMULATIVE_VARIANCE_THRESHOLD})'
-        )
-    if signal_direction == 'FLAT':
-        blocked_reasons.append('FLAT-SIGNAL')
+        if auction_flag == 'SUPPRESS':
+            blocked_reasons.append('AUCTION-SUPPRESS')
+        if tenor_stationarity in ('NON-STATIONARY', 'AMBIGUOUS', 'UNKNOWN'):
+            blocked_reasons.append(f'STATIONARITY-{tenor_stationarity}')
+        if cumvar_low:
+            blocked_reasons.append(
+                f'LOW-CUMVAR({cumvar:.3f}<{config.CUMULATIVE_VARIANCE_THRESHOLD})'
+            )
+        if signal_direction == 'FLAT':
+            blocked_reasons.append('FLAT-SIGNAL')
 
-    if blocked_reasons:
-        card['trade_eligibility'] = (
-            f"BLOCKED ({', '.join(blocked_reasons)})"
-        )
-    elif vote_count is not None and vote_count == 0:
-        card['trade_eligibility'] = (
-            'BLOCKED — Non-Stationary Regime (4/4 windows flagging)'
-        )
-    elif vote_count is not None and vote_count == 2:
-        card['trade_eligibility'] = (
-            'WARNING — Regime Deterioration Developing '
-            '(2/4 windows non-stationary)'
-        )
-    else:
-        card['trade_eligibility'] = 'ELIGIBLE'
+        if blocked_reasons:
+            card['trade_eligibility'] = (
+                f"BLOCKED ({', '.join(blocked_reasons)})"
+            )
+        elif vote_count is not None and vote_count == 0:
+            card['trade_eligibility'] = (
+                'BLOCKED — Non-Stationary Regime (4/4 windows flagging)'
+            )
+        elif vote_count is not None and vote_count == 2:
+            card['trade_eligibility'] = (
+                'WARNING — Regime Deterioration Developing '
+                '(2/4 windows non-stationary)'
+            )
+        else:
+            card['trade_eligibility'] = 'ELIGIBLE'
 
     return card
 

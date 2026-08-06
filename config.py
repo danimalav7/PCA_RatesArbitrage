@@ -56,17 +56,33 @@ Z_ENTRY_THRESHOLD   = 2.0     # |Z| must exceed this to generate a signal
 #   (b) Reference baseline for run_sensitivity.py scale mode
 #   Do NOT remove Z_ENTRY_THRESHOLD — it is still used as fallback.
 Z_ENTRY_THRESHOLD_MAP = {
-    '1Mo':  3.0,   # negative overlay IR at Z=2.0 (-0.078 Sharpe)
-    '3Mo':  3.0,   # worst short-end overlay IR  (-0.263 Sharpe)
+    # NOTE: 1Mo and 3Mo are in EXCLUDED_TENORS — these map values
+    # are retained as reference but are never used in live logic.
+    '1Mo':  3.0,   # excluded — see EXCLUDED_TENORS
+    '3Mo':  3.0,   # excluded — see EXCLUDED_TENORS
     '6Mo':  2.0,   # positive overlay IR          (+0.068 Sharpe)
-    '1Yr':  2.5,   # borderline                   (-0.165 Sharpe)
+    '1Yr':  3.0,   # raised from 2.5 — overlay IR -0.027 at Z=2.5
     '2Yr':  2.0,   # positive overlay IR          (+0.075 Sharpe)
     '3Yr':  3.0,   # most negative overlay IR     (-0.532 Sharpe)
-    '5Yr':  2.5,   # borderline                   (-0.219 Sharpe)
+    '5Yr':  3.0,   # raised from 2.5 — overlay IR -0.181 at Z=2.5
     '7Yr':  2.0,   # best overlay IR              (+0.319 Sharpe)
     '10Yr': 2.5,   # borderline                   (-0.113 Sharpe)
     '30Yr': 2.0,   # strong positive overlay IR   (+0.161 Sharpe)
 }
+# ── Excluded tenors ───────────────────────────────────────────────────────
+# Tenors explicitly excluded from signal generation and trade entry.
+# Reason: negative overlay IR at all tested Z thresholds — structural
+# rf drag on short-end tenors caused by Fed Funds tracking the short
+# end of the curve. In high-rate environments rf cost on active days
+# exceeds bps P&L regardless of entry threshold.
+#
+# Per-tenor Section 10c overlay IR at Z=3.0 (Sprint F1 backtest):
+#   1Mo: -0.075 Sharpe, -49.34 bps total excess over 19 years
+#   3Mo: -0.100 Sharpe, -29.75 bps total excess over 19 years
+#
+# To re-enable a tenor: remove it from this set.
+# These tenors still appear in signal scan table with EXCLUDED status.
+EXCLUDED_TENORS = {'1Mo', '3Mo'}
 Z_EXIT_THRESHOLD    = 0.5     # mean reversion exit: LONG exits at Z <= +0.5, SHORT at Z >= -0.5
                               # Captures ~83% of mean reversion (Z=3.0 → Z=0.5)
                               # without waiting for full overshoot to opposite side
@@ -277,6 +293,22 @@ def config_validate():
         errors.append(
             f"Z_ENTRY_THRESHOLD={Z_ENTRY_THRESHOLD} out of range "
             f"[1.5, 5.0]."
+        )
+
+    # Check EXCLUDED_TENORS is a subset of TENORS
+    invalid_excluded = EXCLUDED_TENORS - set(TENORS)
+    if invalid_excluded:
+        errors.append(
+            f"EXCLUDED_TENORS contains unknown tenors: "
+            f"{invalid_excluded}. Must be subset of TENORS."
+        )
+
+    # Warn if all tenors are excluded (strategy would have no signals)
+    active_tenors = set(TENORS) - EXCLUDED_TENORS
+    if len(active_tenors) == 0:
+        errors.append(
+            "EXCLUDED_TENORS excludes all tenors — "
+            "strategy would generate no signals."
         )
 
     if errors:
