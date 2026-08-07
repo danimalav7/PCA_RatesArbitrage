@@ -383,9 +383,20 @@ def run_backtest(
         for tenor in tenors_to_remove:
             del positions[tenor]
 
-        # ── SECTION B: ENTRY SIGNAL GENERATION ───────────────────────────────
+        # ── SECTION B: Entry signal generation ───────────────────────────────
+        # Gate order:
+        #   0. Exclusion gate (EXCLUDED_TENORS) — skip immediately
+        #   1. Existing position check
+        #   2. Cumulative variance gate
+        #   3. Z threshold gate (per-tenor Z_ENTRY_THRESHOLD_MAP)
+        #   4. Dual ADF+KPSS stationarity gate
+        #   5. Auction suppression gate
         if execution_date is not None:
             for tenor in tenors:
+                # Exclusion gate — skip tenors in EXCLUDED_TENORS entirely
+                if tenor in config.EXCLUDED_TENORS:
+                    continue
+
                 if tenor in positions:
                     continue
 

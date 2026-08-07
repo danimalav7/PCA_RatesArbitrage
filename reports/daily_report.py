@@ -272,6 +272,8 @@ def generate_daily_report(
     # ── Section 1: Signal scan table rows ─────────────────────────────────────
     def _row_color(row):
         elig = str(row.get('trade_eligibility', ''))
+        if 'EXCLUDED' in elig:
+            return '#e9ecef'
         if elig == 'ELIGIBLE':
             return '#d4edda'
         if elig.startswith('WARNING'):
@@ -305,7 +307,10 @@ def generate_daily_report(
         except (TypeError, ValueError):
             adf_str = 'N/A'
         z_thresh_val = row.get('z_threshold_used', config.Z_ENTRY_THRESHOLD)
-        z_thresh_str = f"{z_thresh_val:.1f}"
+        if z_thresh_val is None:
+            z_thresh_str = '—'
+        else:
+            z_thresh_str = f"{float(z_thresh_val):.1f}"
         table_rows += f"""
             <tr style="background:{bg}">
                 <td>{row['tenor']}</td>
@@ -705,6 +710,9 @@ def generate_daily_report(
         </div>
         <div class="legend-item">
             <div class="swatch" style="background:#f8d7da"></div> Blocked
+        </div>
+        <div class="legend-item">
+            <div class="swatch" style="background:#e9ecef"></div> Excluded
         </div>
     </div>
     <table>
