@@ -61,10 +61,14 @@ Z_ENTRY_THRESHOLD_MAP = {
     '1Mo':  3.0,   # excluded — see EXCLUDED_TENORS
     '3Mo':  3.0,   # excluded — see EXCLUDED_TENORS
     '6Mo':  2.0,   # positive overlay IR          (+0.068 Sharpe)
-    '1Yr':  3.0,   # raised from 2.5 — overlay IR -0.027 at Z=2.5
+    '1Yr':  2.5,   # reverted from 3.0 — Z=3.0 gave only 19 trades
+                   # (below ~30 trade minimum for reliable overlay IR)
+                   # at Z=2.5: 34 trades, Sharpe -0.027 (near neutral)
     '2Yr':  2.0,   # positive overlay IR          (+0.075 Sharpe)
     '3Yr':  3.0,   # most negative overlay IR     (-0.532 Sharpe)
-    '5Yr':  3.0,   # raised from 2.5 — overlay IR -0.181 at Z=2.5
+    '5Yr':  2.5,   # reverted from 3.0 — Z=3.0 gave only 23 trades
+                   # stop-loss rate 13% dominated small sample
+                   # at Z=2.5: 37 trades, Sharpe -0.181 (acceptable drag)
     '7Yr':  2.0,   # best overlay IR              (+0.319 Sharpe)
     '10Yr': 2.5,   # borderline                   (-0.113 Sharpe)
     '30Yr': 2.0,   # strong positive overlay IR   (+0.161 Sharpe)
