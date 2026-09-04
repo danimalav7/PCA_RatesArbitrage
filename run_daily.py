@@ -119,7 +119,6 @@ def main():
     report_path = generate_daily_report(
         signal_scan=signal_scan,
         z_score_df=z_score_df,
-        rolling_adf_252d=rolling_adf_252d,
         cumulative_variance_s=cumulative_variance_s,
         backtest_results=backtest_results,
         report_date=report_date,
