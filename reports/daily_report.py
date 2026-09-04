@@ -56,7 +56,6 @@ def _sharpe_bg(v):
 def generate_daily_report(
     signal_scan: pd.DataFrame,
     z_score_df: pd.DataFrame,
-    rolling_adf_252d: pd.DataFrame,
     cumulative_variance_s: pd.Series,
     backtest_results: dict = None,
     report_date: pd.Timestamp = None,
@@ -72,10 +71,7 @@ def generate_daily_report(
         Output of scan_signals() for the report date.
     z_score_df : pd.DataFrame
         Full Z-score history. Used for time series chart.
-        Last 252 trading days displayed.
-    rolling_adf_252d : pd.DataFrame
-        Full 252d rolling ADF p-value history.
-        Last 252 trading days displayed.
+        Last 504 trading days (~2 years) displayed.
     cumulative_variance_s : pd.Series
         PC1+PC2 cumulative explained variance per date.
         Output of compute_pca_residuals() second return value.
@@ -195,7 +191,7 @@ def generate_daily_report(
     """
 
     # ── Section 1, Chart 1: Z-score (include_plotlyjs='cdn') ─────────────────
-    zscore_recent = z_score_df.tail(252)
+    zscore_recent = z_score_df.tail(504)
     fig_z = go.Figure()
     for tenor in tenors:
         fig_z.add_trace(go.Scatter(
@@ -224,7 +220,10 @@ def generate_daily_report(
     fig_z.update_layout(
         title=dict(
             text=(
-                f'<b>Rolling {config.ZSCORE_WINDOW}-Day Z-Scores — All Tenors</b>'
+                f'<b>Rolling {config.ZSCORE_WINDOW}-Day Z-Scores — '
+                f'All Tenors</b><br>'
+                f'Per-tenor entry thresholds | '
+                f'Last 504 trading days (~2 years) | Mode: {mode}'
             ),
             x=0.5, font=dict(size=16),
         ),
@@ -236,40 +235,16 @@ def generate_daily_report(
     )
     zscore_html = fig_z.to_html(full_html=False, include_plotlyjs='cdn')
 
-    # ── Section 1, Chart 2: Rolling ADF p-values (include_plotlyjs=False) ────
-    adf_recent = rolling_adf_252d.tail(252)
-    fig_adf = go.Figure()
-    for tenor in tenors:
-        fig_adf.add_trace(go.Scatter(
-            x=adf_recent.index, y=adf_recent[tenor],
-            mode='lines', name=tenor,
-            line=dict(width=1.5, color=color_map[tenor]),
-            hovertemplate=f'<b>{tenor}:</b> p = %{{y:.4f}}<extra></extra>',
-        ))
-    fig_adf.add_hline(
-        y=config.ADF_THRESHOLD, line_dash='dash',
-        line_color='red', line_width=1.5,
-        annotation_text='Stationary threshold (p=0.05)',
-        annotation_position='top right',
-        annotation_font=dict(color='red', size=11),
-    )
-    fig_adf.update_layout(
-        title=dict(
-            text=(
-                f'<b>Rolling {config.ADF_ENTRY_WINDOW}-Day ADF p-Values — All Tenors</b>'
-            ),
-            x=0.5, font=dict(size=16),
-        ),
-        xaxis_title='Date', yaxis_title='ADF p-value',
-        yaxis=dict(range=[0, 1.05], tickformat='.2f'),
-        template='plotly_white', hovermode='x unified',
-        legend=dict(orientation='h', yanchor='bottom', y=1.02,
-                    xanchor='center', x=0.5),
-        height=500,
-    )
-    adf_html = fig_adf.to_html(full_html=False, include_plotlyjs=False)
-
     # ── Section 1: Signal scan table rows ─────────────────────────────────────
+    # Re-sort signal_scan by tenor order (config.TENORS defines order)
+    # Excluded tenors appear at bottom of table
+    tenor_order = {t: i for i, t in enumerate(config.TENORS)}
+    signal_scan = signal_scan.copy()
+    signal_scan['_tenor_order'] = signal_scan['tenor'].map(tenor_order)
+    signal_scan = signal_scan.sort_values(
+        '_tenor_order', ascending=True
+    ).drop(columns=['_tenor_order']).reset_index(drop=True)
+
     def _row_color(row):
         elig = str(row.get('trade_eligibility', ''))
         if 'EXCLUDED' in elig:
@@ -306,10 +281,15 @@ def generate_daily_report(
             adf_str = f"{float(adf_p):.4f}" if not pd.isna(adf_p) else 'N/A'
         except (TypeError, ValueError):
             adf_str = 'N/A'
-        z_thresh_val = row.get('z_threshold_used', config.Z_ENTRY_THRESHOLD)
-        if z_thresh_val is None:
+        # Z Thresh: read from config map directly for reliability
+        # Falls back to global Z_ENTRY_THRESHOLD if tenor not in map
+        tenor_name = row['tenor']
+        if tenor_name in config.EXCLUDED_TENORS:
             z_thresh_str = '—'
         else:
+            z_thresh_val = config.Z_ENTRY_THRESHOLD_MAP.get(
+                tenor_name, config.Z_ENTRY_THRESHOLD
+            )
             z_thresh_str = f"{float(z_thresh_val):.1f}"
         table_rows += f"""
             <tr style="background:{bg}">
@@ -625,10 +605,10 @@ def generate_daily_report(
                     'No position data available.</p>'
                 )
 
-            # ── Top 5 trades table ─────────────────────────────────────────────
-            top5      = tdf.nlargest(5, 'pnl_bps')
+            # ── Top 10 trades table ────────────────────────────────────────────
+            top_trades      = tdf.nlargest(10, 'pnl_bps')
             top5_rows = ''
-            for i, (_, row) in enumerate(top5.iterrows(), 1):
+            for i, (_, row) in enumerate(top_trades.iterrows(), 1):
                 dir_val = str(row.get('direction', ''))
                 dir_bg  = '#d4edda' if dir_val == 'LONG' else '#ffeeba'
                 ez_raw  = row.get('entry_zscore', np.nan)
@@ -674,7 +654,7 @@ def generate_daily_report(
     <div class="chart-container">{chart_c_html}</div>
     <h3>Daily Positions — Last 252 Trading Days</h3>
     <div class="chart-container">{chart_d_html}</div>
-    <h3>Top 5 Trades</h3>
+    <h3>Top 10 Trades</h3>
     {top5_table_html}"""
 
     # ── Assemble final HTML ───────────────────────────────────────────────────
@@ -693,7 +673,6 @@ def generate_daily_report(
     <div class="meta">
         <strong>Report date:</strong> {report_date.date()} &nbsp;|&nbsp;
         <strong>Mode:</strong> {mode} &nbsp;|&nbsp;
-        <strong>Entry threshold:</strong> \xb1{config.Z_ENTRY_THRESHOLD} &nbsp;|&nbsp;
         <strong>Generated:</strong> {dt.datetime.now().strftime('%Y-%m-%d %H:%M')}
     </div>
 
@@ -722,7 +701,7 @@ def generate_daily_report(
                 <th>Z-Score</th>
                 <th>Z Thresh</th>
                 <th>Direction</th>
-                <th>Status</th>
+                <th>Bond Status</th>
                 <th>ADF p (252d)</th>
                 <th>Cumvar</th>
                 <th>Vote</th>
@@ -735,12 +714,29 @@ def generate_daily_report(
             {table_rows}
         </tbody>
     </table>
+    <div style="font-size:0.82em; color:#6c757d; margin-top:8px;
+                margin-bottom:20px; line-height:1.6;">
+      <strong>CumVar</strong> — PC1+PC2 cumulative explained
+      variance on this date. Measures how reliably PCA is
+      capturing yield curve structure. Above 80% = reliable
+      signal. Below 80% = signals suppressed (LOW-CUMVAR gate).
+      &nbsp;&nbsp;
+      <strong>Vote</strong> — number of rolling ADF windows
+      (120d / 180d / 252d) confirming residual stationarity.
+      3/3 = all windows stationary (strong regime).
+      0/3 = all windows non-stationary (exit trigger).
+      &nbsp;&nbsp;
+      <strong>Z Thresh</strong> — per-tenor entry threshold
+      from config.Z_ENTRY_THRESHOLD_MAP. Signal must exceed
+      this value to be eligible for entry.
+      &nbsp;&nbsp;
+      <strong>Bond Status</strong> — CHEAP = yield above PCA
+      fair value (LONG signal). RICH = yield below PCA fair
+      value (SHORT signal).
+    </div>
 
     <h3>Z-Score Time Series</h3>
     <div class="chart-container">{zscore_html}</div>
-
-    <h3>Rolling ADF p-Values (252d)</h3>
-    <div class="chart-container">{adf_html}</div>
 
     <!-- SECTION 2 -->
     <div class="section-divider"></div>
